@@ -12,6 +12,7 @@ import { requireAuth } from "./middleware/auth.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
+let server;
 const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:3000";
 const SALES_TAX_RATE = 0.0825;
 const ENTRY_TYPES = ["Repair", "Sales", "Expenses"];
@@ -25,6 +26,10 @@ const MAX_PAGE_SIZE = 200;
 
 if (!process.env.JWT_SECRET) {
   throw new Error("JWT_SECRET is required");
+}
+
+if (!process.env.MONGODB_URI) {
+  throw new Error("MONGODB_URI is required");
 }
 
 app.use(
@@ -906,12 +911,42 @@ app.use((error, _req, res, _next) => {
 
 async function start() {
   await mongoose.connect(process.env.MONGODB_URI);
-  app.listen(port, () => {
-    console.log(`API running on http://localhost:${port}`);
+  server = app.listen(port, () => {
+    console.log(`API running on port ${port}`);
   });
+}
+
+async function shutdown(signal) {
+  console.log(`Received ${signal}. Shutting down API.`);
+
+  if (server) {
+    await new Promise((resolve, reject) => {
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        resolve();
+      });
+    });
+  }
+
+  await mongoose.connection.close();
 }
 
 start().catch((error) => {
   console.error("Failed to start API", error);
   process.exit(1);
+});
+
+["SIGINT", "SIGTERM"].forEach((signal) => {
+  process.on(signal, () => {
+    shutdown(signal)
+      .then(() => process.exit(0))
+      .catch((error) => {
+        console.error("Failed to shut down API cleanly", error);
+        process.exit(1);
+      });
+  });
 });
