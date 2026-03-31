@@ -13,7 +13,7 @@ import { requireAuth } from "./middleware/auth.js";
 const app = express();
 const port = Number(process.env.PORT || 4000);
 let server;
-const clientOrigin = process.env.CLIENT_ORIGIN || "http://localhost:3000";
+const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
 const SALES_TAX_RATE = 0.0825;
 const ENTRY_TYPES = ["Repair", "Sales", "Expenses"];
 const ENTRY_STATUSES = ["Pending", "Completed", "Paid"];
@@ -32,9 +32,32 @@ if (!process.env.MONGODB_URI) {
   throw new Error("MONGODB_URI is required");
 }
 
+function normalizeOrigin(value) {
+  return String(value || "").trim().replace(/\/+$/, "");
+}
+
+function getAllowedOrigins() {
+  const configuredOrigins = String(process.env.CLIENT_ORIGIN || "")
+    .split(",")
+    .map(normalizeOrigin)
+    .filter(Boolean);
+
+  const origins = configuredOrigins.length > 0 ? configuredOrigins : DEFAULT_ALLOWED_ORIGINS;
+  return new Set(origins);
+}
+
+const allowedOrigins = getAllowedOrigins();
+
 app.use(
   cors({
-    origin: clientOrigin,
+    origin(origin, callback) {
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      callback(null, allowedOrigins.has(normalizeOrigin(origin)));
+    },
     credentials: true
   })
 );
@@ -910,10 +933,10 @@ app.use((error, _req, res, _next) => {
 });
 
 async function start() {
-  await mongoose.connect(process.env.MONGODB_URI);
-  server = app.listen(port, () => {
+  server = app.listen(port, "0.0.0.0", () => {
     console.log(`API running on port ${port}`);
   });
+  await mongoose.connect(process.env.MONGODB_URI);
 }
 
 async function shutdown(signal) {
