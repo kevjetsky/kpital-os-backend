@@ -1,0 +1,9 @@
+export const SALES_TAX_RATE = 0.0825;
+export const ENTRY_TYPES = ["Repair", "Sales", "Expenses"];
+export const ENTRY_STATUSES = ["Pending", "Completed", "Paid"];
+export const REFERENCE_OPTION_KINDS = ["customer", "product_service"];
+export const PRODUCT_SERVICE_TYPES = ["product", "service"];
+export const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || "kpital_token";
+export const COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+export const DEFAULT_PAGE_SIZE = 50;
+export const MAX_PAGE_SIZE = 200;
