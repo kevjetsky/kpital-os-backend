@@ -18,6 +18,7 @@ const referenceOptionSchema = new mongoose.Schema(
     state: { type: String, default: "", trim: true },
     postalCode: { type: String, default: "", trim: true },
     reference: { type: String, default: "", trim: true },
+    notes: { type: String, default: "", trim: true },
     optionType: {
       type: String,
       enum: ["", "product", "service"],

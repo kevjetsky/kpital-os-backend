@@ -4,6 +4,7 @@ import { ReferenceOption } from "./models/ReferenceOption.js";
 import { Settings } from "./models/Settings.js";
 import {
   SALES_TAX_RATE,
+  TAX_EXEMPT_ENTRY_TYPES,
   PRODUCT_SERVICE_TYPES,
   ENTRY_STATUSES,
   AUTH_COOKIE_NAME,
@@ -30,10 +31,11 @@ export function issueAuthToken() {
   });
 }
 
-export function computeAmounts(income, expense) {
+export function computeAmounts(income, expense, type = "") {
   const safeIncome = Number.isFinite(income) ? income : 0;
   const safeExpense = Number.isFinite(expense) ? expense : 0;
-  const salesTax = roundMoney(safeIncome * SALES_TAX_RATE);
+  const taxExempt = TAX_EXEMPT_ENTRY_TYPES.includes(type);
+  const salesTax = taxExempt ? 0 : roundMoney(safeIncome * SALES_TAX_RATE);
   const netProfit = roundMoney(safeIncome - safeExpense - salesTax);
 
   return {
@@ -133,7 +135,8 @@ export function serializeReferenceOption(option) {
       city,
       state,
       postalCode,
-      reference: option.reference || ""
+      reference: option.reference || "",
+      notes: option.notes || ""
     };
   }
 
