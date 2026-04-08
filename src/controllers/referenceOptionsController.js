@@ -75,6 +75,7 @@ export const create = asyncHandler(async (req, res) => {
     const formattedAddress = formatCustomerAddress({ addressLine1, addressLine2, city, state, postalCode });
     const legacyAddress = String(req.body?.address || "").trim();
 
+    const notes = String(req.body?.notes || "").trim();
     payload.phone = phone;
     payload.email = email;
     payload.address = formattedAddress || legacyAddress;
@@ -84,6 +85,7 @@ export const create = asyncHandler(async (req, res) => {
     payload.state = state;
     payload.postalCode = postalCode;
     payload.reference = reference;
+    payload.notes = notes;
   }
 
   if (kind === "product_service") {
@@ -155,6 +157,7 @@ export const update = asyncHandler(async (req, res) => {
     existing.phone = hasOwn("phone") ? String(req.body?.phone || "").trim() : (existing.phone || "");
     existing.email = hasOwn("email") ? String(req.body?.email || "").trim() : (existing.email || "");
     existing.reference = hasOwn("reference") ? String(req.body?.reference || "").trim() : (existing.reference || "");
+    existing.notes = hasOwn("notes") ? String(req.body?.notes || "").trim() : (existing.notes || "");
     existing.addressLine1 = addressLine1;
     existing.addressLine2 = addressLine2;
     existing.city = city;

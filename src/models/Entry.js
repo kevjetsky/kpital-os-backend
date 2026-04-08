@@ -6,7 +6,7 @@ const entrySchema = new mongoose.Schema(
     type: {
       type: String,
       required: true,
-      enum: ["Repair", "Sales", "Expenses"]
+      enum: ["Repair", "Sales", "Expenses", "Tip"]
     },
     description: { type: String, default: "", trim: true },
     income: { type: Number, required: true, default: 0 },
@@ -28,6 +28,16 @@ const entrySchema = new mongoose.Schema(
     productServicePrice: { type: Number, required: true, default: 0 },
     productServiceOptionId: { type: mongoose.Schema.Types.ObjectId, default: null },
     notes: { type: String, default: "", trim: true },
+    category: { type: String, default: "", trim: true },
+    payments: [
+      {
+        amount: { type: Number, required: true },
+        date: { type: Date, required: true },
+        method: { type: String, default: "", trim: true },
+        note: { type: String, default: "", trim: true },
+        createdAt: { type: Date, default: Date.now }
+      }
+    ],
     status: {
       type: String,
       required: true,

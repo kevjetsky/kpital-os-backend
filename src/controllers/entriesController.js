@@ -13,6 +13,7 @@ import {
 import {
   ENTRY_TYPES,
   ENTRY_STATUSES,
+  EXPENSE_CATEGORIES,
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE
 } from "../constants.js";
@@ -24,7 +25,7 @@ export const list = asyncHandler(async (req, res) => {
   if (type) {
     const typeFilter = String(type);
     if (!ENTRY_TYPES.includes(typeFilter)) {
-      return res.status(400).json({ message: "Type filter must be Repair, Sales, or Expenses." });
+      return res.status(400).json({ message: "Type filter must be Repair, Sales, Expenses, or Tip." });
     }
     query.type = typeFilter;
   }
@@ -76,7 +77,7 @@ export const create = asyncHandler(async (req, res) => {
   const type = String(body.type || "");
 
   if (!ENTRY_TYPES.includes(type)) {
-    return res.status(400).json({ message: "Type must be Repair, Sales, or Expenses." });
+    return res.status(400).json({ message: "Type must be Repair, Sales, Expenses, or Tip." });
   }
 
   const date = new Date(body.date);
@@ -91,6 +92,8 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Status must be Pending, Completed, or Paid." });
   }
   const notes = String(body.notes || "").trim();
+  const rawCategory = String(body.category || "").trim();
+  const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
 
   const parsedIncome = parseMoneyInput(body.income ?? 0, "Income");
   if (parsedIncome.error) {
@@ -161,7 +164,7 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Description is required when no product/service is selected." });
   }
 
-  const amounts = computeAmounts(income, expense);
+  const amounts = computeAmounts(income, expense, type);
 
   const entry = await Entry.create({
     date,
@@ -179,6 +182,7 @@ export const create = asyncHandler(async (req, res) => {
     productServiceOptionId,
     ...amounts,
     notes,
+    category,
     status
   });
 
@@ -198,7 +202,7 @@ export const update = asyncHandler(async (req, res) => {
 
   const type = req.body.type ? String(req.body.type) : existing.type;
   if (!ENTRY_TYPES.includes(type)) {
-    return res.status(400).json({ message: "Type must be Repair, Sales, or Expenses." });
+    return res.status(400).json({ message: "Type must be Repair, Sales, Expenses, or Tip." });
   }
 
   const date = req.body.date ? new Date(req.body.date) : existing.date;
@@ -232,6 +236,8 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Status must be Pending, Completed, or Paid." });
   }
   const notes = req.body.notes !== undefined ? String(req.body.notes).trim() : existing.notes;
+  const rawCategory = req.body.category !== undefined ? String(req.body.category || "").trim() : (existing.category || "");
+  const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
 
   let customerName = existing.customerName || "";
   let customerPhone = existing.customerPhone || "";
@@ -363,7 +369,7 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Description is required when no product/service is selected." });
   }
 
-  const amounts = computeAmounts(income, expense);
+  const amounts = computeAmounts(income, expense, type);
 
   existing.date = date;
   existing.type = type;
@@ -384,6 +390,7 @@ export const update = asyncHandler(async (req, res) => {
   existing.productServiceOptionId = productServiceOptionId;
   existing.status = status || "Pending";
   existing.notes = notes;
+  existing.category = category;
 
   await existing.save();
   return res.json(existing);
@@ -401,4 +408,33 @@ export const remove = asyncHandler(async (req, res) => {
   }
 
   return res.json({ ok: true });
+});
+
+export const addPayment = asyncHandler(async (req, res) => {
+  const entryId = String(req.params?.id || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(entryId)) {
+    return res.status(400).json({ message: "Invalid entry id." });
+  }
+
+  const entry = await Entry.findById(entryId);
+  if (!entry) {
+    return res.status(404).json({ message: "Entry not found." });
+  }
+
+  const parsedAmount = parseMoneyInput(req.body?.amount, "Amount");
+  if (parsedAmount.error) {
+    return res.status(400).json({ message: parsedAmount.error });
+  }
+
+  const date = new Date(req.body?.date);
+  if (Number.isNaN(date.getTime())) {
+    return res.status(400).json({ message: "Invalid payment date." });
+  }
+
+  const method = String(req.body?.method || "").trim();
+  const note = String(req.body?.note || "").trim();
+
+  entry.payments.push({ amount: parsedAmount.value, date, method, note, createdAt: new Date() });
+  await entry.save();
+  return res.json(entry);
 });

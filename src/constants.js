@@ -1,5 +1,7 @@
 export const SALES_TAX_RATE = 0.0825;
-export const ENTRY_TYPES = ["Repair", "Sales", "Expenses"];
+export const ENTRY_TYPES = ["Repair", "Sales", "Expenses", "Tip"];
+export const TAX_EXEMPT_ENTRY_TYPES = ["Tip"];
+export const EXPENSE_CATEGORIES = ["Rent", "Parts", "Marketing", "Utilities", "Payroll", "Other"];
 export const ENTRY_STATUSES = ["Pending", "Completed", "Paid"];
 export const REFERENCE_OPTION_KINDS = ["customer", "product_service"];
 export const PRODUCT_SERVICE_TYPES = ["product", "service"];
