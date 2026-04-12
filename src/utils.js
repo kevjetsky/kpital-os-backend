@@ -31,11 +31,12 @@ export function issueAuthToken() {
   });
 }
 
-export function computeAmounts(income, expense, type = "") {
+export function computeAmounts(income, expense, type = "", taxRate) {
   const safeIncome = Number.isFinite(income) ? income : 0;
   const safeExpense = Number.isFinite(expense) ? expense : 0;
+  const rate = (Number.isFinite(taxRate) && taxRate >= 0 && taxRate <= 1) ? taxRate : SALES_TAX_RATE;
   const taxExempt = TAX_EXEMPT_ENTRY_TYPES.includes(type);
-  const salesTax = taxExempt ? 0 : roundMoney(safeIncome * SALES_TAX_RATE);
+  const salesTax = taxExempt ? 0 : roundMoney(safeIncome * rate);
   const netProfit = roundMoney(safeIncome - safeExpense - salesTax);
 
   return {
