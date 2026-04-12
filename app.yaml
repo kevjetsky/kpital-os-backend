@@ -3,15 +3,18 @@ env: standard
 
 instance_class: F1
 
+automatic_scaling:
+  max_instances: 5
+
 # By default, Node.js applications will start using "npm start" (which maps to "node src/index.js").
 # App Engine will dynamically assign a port and provide it to your app using the PORT environment variable.
 
 env_variables:
   NODE_ENV: "production"
 
-  # Uncomment and configure these variables for your production environment.
+  # Secrets are stored directly in App Engine environment (set at deploy time).
   # Do not commit real production secrets to version control.
-  # Secret variables (like MONGODB_URI and JWT_SECRET) are better stored in Google Cloud Secret Manager.
-  # MONGODB_URI: "mongodb+srv://user:password@cluster.mongodb.net/dbname"
-  # JWT_SECRET: "your_production_jwt_secret"
-  # CLIENT_ORIGIN: "https://your-frontend-domain.com"
+  # To redeploy with updated secrets, add them here temporarily, deploy, then remove.
+  # MONGODB_URI: "..."
+  # JWT_SECRET: "..."
+  # CLIENT_ORIGIN: "https://kpital-os.vercel.app"
