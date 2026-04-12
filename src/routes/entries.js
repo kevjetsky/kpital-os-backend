@@ -9,5 +9,6 @@ router.post("/", requireAuth, entries.create);
 router.put("/:id", requireAuth, entries.update);
 router.delete("/:id", requireAuth, entries.remove);
 router.post("/:id/payments", requireAuth, entries.addPayment);
+router.delete("/:id/payments/:paymentId", requireAuth, entries.deletePayment);
 
 export default router;

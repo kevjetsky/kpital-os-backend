@@ -164,7 +164,8 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Description is required when no product/service is selected." });
   }
 
-  const amounts = computeAmounts(income, expense, type);
+  const rawTaxRate = body.taxRate !== undefined ? Number(body.taxRate) : undefined;
+  const amounts = computeAmounts(income, expense, type, rawTaxRate);
 
   const entry = await Entry.create({
     date,
@@ -369,7 +370,8 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Description is required when no product/service is selected." });
   }
 
-  const amounts = computeAmounts(income, expense, type);
+  const rawTaxRate = req.body.taxRate !== undefined ? Number(req.body.taxRate) : undefined;
+  const amounts = computeAmounts(income, expense, type, rawTaxRate);
 
   existing.date = date;
   existing.type = type;
@@ -435,6 +437,32 @@ export const addPayment = asyncHandler(async (req, res) => {
   const note = String(req.body?.note || "").trim();
 
   entry.payments.push({ amount: parsedAmount.value, date, method, note, createdAt: new Date() });
+  await entry.save();
+  return res.json(entry);
+});
+
+export const deletePayment = asyncHandler(async (req, res) => {
+  const entryId = String(req.params?.id || "").trim();
+  const paymentId = String(req.params?.paymentId || "").trim();
+
+  if (!mongoose.Types.ObjectId.isValid(entryId)) {
+    return res.status(400).json({ message: "Invalid entry id." });
+  }
+  if (!mongoose.Types.ObjectId.isValid(paymentId)) {
+    return res.status(400).json({ message: "Invalid payment id." });
+  }
+
+  const entry = await Entry.findById(entryId);
+  if (!entry) {
+    return res.status(404).json({ message: "Entry not found." });
+  }
+
+  const paymentIndex = entry.payments.findIndex((p) => String(p._id) === paymentId);
+  if (paymentIndex === -1) {
+    return res.status(404).json({ message: "Payment not found." });
+  }
+
+  entry.payments.splice(paymentIndex, 1);
   await entry.save();
   return res.json(entry);
 });
