@@ -19,7 +19,7 @@ import {
 } from "../constants.js";
 
 export const list = asyncHandler(async (req, res) => {
-  const { type, status, page, limit } = req.query;
+  const { type, status, page, limit, search } = req.query;
   const query = {};
 
   if (type) {
@@ -36,6 +36,22 @@ export const list = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: "Status filter must be Pending, Completed, or Paid." });
     }
     query.status = statusFilter;
+  }
+
+  const searchText = String(search || "").trim();
+  if (searchText) {
+    const escapedSearch = searchText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const searchRegex = new RegExp(escapedSearch, "i");
+    query.$or = [
+      { description: searchRegex },
+      { notes: searchRegex },
+      { customerName: searchRegex },
+      { customerPhone: searchRegex },
+      { customerEmail: searchRegex },
+      { customerReference: searchRegex },
+      { productServiceName: searchRegex },
+      { category: searchRegex }
+    ];
   }
 
   const hasPagination = page !== undefined || limit !== undefined;

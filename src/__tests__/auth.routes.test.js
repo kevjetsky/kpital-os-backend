@@ -29,6 +29,16 @@ describe("GET /api/auth/status", () => {
     expect(res.body.requiresSetup).toBe(true);
     expect(res.body.authenticated).toBe(false);
   });
+
+  it("allows Cloudflare Pages preview origins", async () => {
+    const res = await request(app)
+      .options("/api/auth/status")
+      .set("Origin", "https://d146fa62.kpital-os.pages.dev")
+      .set("Access-Control-Request-Method", "GET");
+
+    expect(res.status).toBe(204);
+    expect(res.headers["access-control-allow-origin"]).toBe("https://d146fa62.kpital-os.pages.dev");
+  });
 });
 
 describe("POST /api/auth/setup", () => {
@@ -85,5 +95,40 @@ describe("GET /api/entries", () => {
       .set("Authorization", `Bearer ${token}`);
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body)).toBe(true);
+  });
+
+  it("filters entries by search text", async () => {
+    await request(app).post("/api/auth/setup").send({ password: "mypassword" });
+    const loginRes = await request(app).post("/api/auth/login").send({ password: "mypassword" });
+    const token = loginRes.body.token;
+
+    await request(app)
+      .post("/api/entries")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        type: "Repair",
+        date: "2026-05-12",
+        description: "HDMI port repair",
+        income: 120,
+        customerName: "Avery Console"
+      });
+    await request(app)
+      .post("/api/entries")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        type: "Sales",
+        date: "2026-05-12",
+        description: "Controller sale",
+        income: 45,
+        customerName: "Morgan Retail"
+      });
+
+    const res = await request(app)
+      .get("/api/entries?search=avery")
+      .set("Authorization", `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0].customerName).toBe("Avery Console");
   });
 });

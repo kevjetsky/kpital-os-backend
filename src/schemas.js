@@ -5,7 +5,7 @@ export const loginSchema = z.object({ password: z.string().min(1, "Password is r
 export const setupSchema = z.object({ password: z.string().min(4, "Password must be at least 4 characters.") });
 
 export const createEntrySchema = z.object({
-  type: z.enum(["Repair", "Sales", "Expenses"]),
+  type: z.enum(["Repair", "Sales", "Expenses", "Tip"]),
   date: z.string().min(1),
   description: z.string().optional().default(""),
   income: z.number().min(0).optional().default(0),
