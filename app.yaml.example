@@ -1,0 +1,17 @@
+runtime: nodejs20
+env: standard
+
+instance_class: F1
+
+automatic_scaling:
+  max_instances: 5
+
+env_variables:
+  NODE_ENV: "production"
+  CLIENT_ORIGIN: "https://your-domain.com"
+  COOKIE_SECURE: "true"
+  COOKIE_SAME_SITE: "none"
+  MONGODB_URI: "mongodb+srv://USER:PASSWORD@cluster.mongodb.net/?appName=your-app"
+  JWT_SECRET: "your-jwt-secret-here"
+  RESEND_API_KEY: "re_your_api_key_here"
+  RESEND_FROM_EMAIL: "Your App <noreply@yourdomain.com>"
