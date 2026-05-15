@@ -8,13 +8,13 @@ const APPOINTMENT_STATUSES = ["requested", "confirmed", "cancelled", "completed"
 const ACTIVE_STATUSES = ["requested", "confirmed"];
 const DEFAULT_SLOT_MINUTES = 120;
 const DEFAULT_WEEKLY_AVAILABILITY = [
-  { day: 0, enabled: false, startTime: "10:00", endTime: "17:00" },
-  { day: 1, enabled: true, startTime: "10:00", endTime: "17:00" },
-  { day: 2, enabled: true, startTime: "10:00", endTime: "17:00" },
-  { day: 3, enabled: true, startTime: "10:00", endTime: "17:00" },
-  { day: 4, enabled: true, startTime: "10:00", endTime: "17:00" },
-  { day: 5, enabled: true, startTime: "10:00", endTime: "17:00" },
-  { day: 6, enabled: false, startTime: "10:00", endTime: "15:00" }
+  { day: 0, blocks: [] },
+  { day: 1, blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }] },
+  { day: 2, blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }] },
+  { day: 3, blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }] },
+  { day: 4, blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }] },
+  { day: 5, blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }] },
+  { day: 6, blocks: [] }
 ];
 
 function dateKey(date) {
@@ -39,61 +39,75 @@ function addDays(base, offset) {
   return next;
 }
 
+// Normalize an array of { startTime, endTime, status } blocks, dropping invalid entries.
+function normalizeBlocks(input) {
+  if (!Array.isArray(input)) return [];
+  return input
+    .map((raw) => {
+      const startTime = String(raw?.startTime || "").trim();
+      const endTime = String(raw?.endTime || "").trim();
+      const status = raw?.status === "blocked" ? "blocked" : "open";
+      const start = parseTime(startTime);
+      const end = parseTime(endTime);
+      if (start === null || end === null || end <= start) return null;
+      return { startTime, endTime, status };
+    })
+    .filter(Boolean);
+}
+
 function normalizeAvailability(input) {
-  const byDay = new Map(DEFAULT_WEEKLY_AVAILABILITY.map((item) => [item.day, { ...item }]));
+  const byDay = new Map(
+    DEFAULT_WEEKLY_AVAILABILITY.map((item) => [item.day, { day: item.day, blocks: [...item.blocks] }])
+  );
   if (Array.isArray(input)) {
     input.forEach((raw) => {
       const day = Number(raw?.day);
       if (!Number.isInteger(day) || day < 0 || day > 6) return;
-      const startTime = String(raw?.startTime || "").trim();
-      const endTime = String(raw?.endTime || "").trim();
-      const start = parseTime(startTime);
-      const end = parseTime(endTime);
-      byDay.set(day, {
-        day,
-        enabled: Boolean(raw?.enabled),
-        startTime: start !== null ? startTime : "10:00",
-        endTime: end !== null && start !== null && end > start ? endTime : "17:00"
-      });
+      byDay.set(day, { day, blocks: normalizeBlocks(raw?.blocks) });
     });
   }
   return Array.from(byDay.values()).sort((a, b) => a.day - b.day);
 }
 
-function normalizeBlocks(input) {
+function normalizeDayOverrides(input) {
   if (!Array.isArray(input)) return [];
   return input
     .map((raw) => {
       const date = String(raw?.date || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+      const blocks = normalizeBlocks(raw?.blocks);
       const reason = String(raw?.reason || "").trim();
-      const startTime = String(raw?.startTime || "").trim();
-      const endTime = String(raw?.endTime || "").trim();
-      const hasTimeRange = Boolean(startTime || endTime);
-      if (!hasTimeRange) return { date, startTime: "", endTime: "", reason };
-
-      const start = parseTime(startTime);
-      const end = parseTime(endTime);
-      if (start === null || end === null || end <= start) return null;
-      return { date, startTime, endTime, reason };
+      return { date, blocks, reason };
     })
-    .filter((block) => block && /^\d{4}-\d{2}-\d{2}$/.test(block.date))
+    .filter(Boolean)
     .slice(0, 120);
 }
 
-function getBlockIntervals(settings, date) {
-  return normalizeBlocks(settings.dayBlocks)
-    .filter((block) => block.date === date)
+// Returns the list of open intervals ({ start, end } in minutes) for a given date,
+// using the day override if one exists, otherwise falling back to the weekly template.
+function getOpenIntervals(settings, date) {
+  const overrides = normalizeDayOverrides(settings.dayOverrides);
+  const override = overrides.find((o) => o.date === date);
+
+  let blocks;
+  if (override) {
+    blocks = override.blocks;
+  } else {
+    const d = new Date(`${date}T00:00:00.000Z`);
+    const weekly = normalizeAvailability(settings.weeklyAvailability);
+    const dayEntry = weekly.find((item) => item.day === d.getUTCDay());
+    blocks = dayEntry?.blocks ?? [];
+  }
+
+  return blocks
+    .filter((block) => block.status === "open")
     .map((block) => {
-      const start = block.startTime ? parseTime(block.startTime) : 0;
-      const end = block.endTime ? parseTime(block.endTime) : 24 * 60;
+      const start = parseTime(block.startTime);
+      const end = parseTime(block.endTime);
       if (start === null || end === null || end <= start) return null;
       return { start, end };
     })
     .filter(Boolean);
-}
-
-function overlapsBlock(start, end, blocks) {
-  return blocks.some((block) => start < block.end && end > block.start);
 }
 
 function serializeSettings(settings) {
@@ -101,7 +115,7 @@ function serializeSettings(settings) {
     slotMinutes: settings.slotMinutes,
     bookingHorizonDays: settings.bookingHorizonDays,
     weeklyAvailability: normalizeAvailability(settings.weeklyAvailability),
-    dayBlocks: normalizeBlocks(settings.dayBlocks)
+    dayOverrides: normalizeDayOverrides(settings.dayOverrides)
   };
 }
 
@@ -113,18 +127,19 @@ async function getSettingsDocument() {
     slotMinutes: DEFAULT_SLOT_MINUTES,
     bookingHorizonDays: 14,
     weeklyAvailability: DEFAULT_WEEKLY_AVAILABILITY,
-    dayBlocks: []
+    dayOverrides: []
   });
 }
 
 async function getSlots(settings, fromDate, days) {
-  const weekly = normalizeAvailability(settings.weeklyAvailability);
   const horizon = Math.min(Math.max(Number(days || settings.bookingHorizonDays || 14), 1), 31);
-  const base = fromDate && /^\d{4}-\d{2}-\d{2}$/.test(fromDate)
-    ? new Date(`${fromDate}T00:00:00.000Z`)
-    : new Date();
+  const base =
+    fromDate && /^\d{4}-\d{2}-\d{2}$/.test(fromDate)
+      ? new Date(`${fromDate}T00:00:00.000Z`)
+      : new Date();
   const start = new Date(Date.UTC(base.getUTCFullYear(), base.getUTCMonth(), base.getUTCDate()));
   const dates = Array.from({ length: horizon }, (_, index) => dateKey(addDays(start, index)));
+
   const appointments = await Appointment.find({
     appointmentDate: { $in: dates },
     status: { $in: ACTIVE_STATUSES }
@@ -132,23 +147,21 @@ async function getSlots(settings, fromDate, days) {
   const booked = new Set(appointments.map((item) => `${item.appointmentDate}:${item.startTime}`));
   const slotMinutes = Math.min(Math.max(Number(settings.slotMinutes || DEFAULT_SLOT_MINUTES), 15), 240);
 
+  const nowUtc = new Date();
+  const nowDate = dateKey(nowUtc);
+  const nowMinutes = nowUtc.getUTCHours() * 60 + nowUtc.getUTCMinutes();
+
   return dates.map((day) => {
-    const date = new Date(`${day}T00:00:00.000Z`);
-    const availability = weekly.find((item) => item.day === date.getUTCDay());
-    if (!availability?.enabled) {
-      return { date: day, slots: [] };
-    }
-    const blockIntervals = getBlockIntervals(settings, day);
-    const startMinutes = parseTime(availability.startTime);
-    const endMinutes = parseTime(availability.endTime);
-    if (startMinutes === null || endMinutes === null || endMinutes <= startMinutes) {
-      return { date: day, slots: [] };
-    }
+    const openIntervals = getOpenIntervals(settings, day);
     const slots = [];
-    for (let minute = startMinutes; minute + slotMinutes <= endMinutes; minute += slotMinutes) {
-      const startTime = formatTime(minute);
-      if (!booked.has(`${day}:${startTime}`) && !overlapsBlock(minute, minute + slotMinutes, blockIntervals)) {
-        slots.push({ startTime, endTime: formatTime(minute + slotMinutes) });
+    for (const interval of openIntervals) {
+      for (let minute = interval.start; minute + slotMinutes <= interval.end; minute += slotMinutes) {
+        // Exclude slots that have already passed today
+        if (day === nowDate && minute <= nowMinutes) continue;
+        const startTime = formatTime(minute);
+        if (!booked.has(`${day}:${startTime}`)) {
+          slots.push({ startTime, endTime: formatTime(minute + slotMinutes) });
+        }
       }
     }
     return { date: day, slots };
@@ -162,20 +175,22 @@ function getRequiredString(body, field, label) {
 
 function validateAppointmentTime(date, startTime, settings) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "Invalid appointment date.";
-  const weekly = normalizeAvailability(settings.weeklyAvailability);
-  const d = new Date(`${date}T00:00:00.000Z`);
-  const availability = weekly.find((item) => item.day === d.getUTCDay());
-  if (!availability?.enabled) return "That day is not available.";
   const start = parseTime(startTime);
-  const windowStart = parseTime(availability.startTime);
-  const windowEnd = parseTime(availability.endTime);
+  if (start === null) return "Invalid appointment time.";
   const slotMinutes = Math.min(Math.max(Number(settings.slotMinutes || DEFAULT_SLOT_MINUTES), 15), 240);
-  if (start === null || windowStart === null || windowEnd === null) return "Invalid appointment time.";
-  if (start < windowStart || start + slotMinutes > windowEnd) return "Appointment time is outside availability.";
-  if ((start - windowStart) % slotMinutes !== 0) return "Appointment time does not match an open slot.";
-  if (overlapsBlock(start, start + slotMinutes, getBlockIntervals(settings, date))) {
-    return "That time is blocked.";
+
+  const openIntervals = getOpenIntervals(settings, date);
+  if (openIntervals.length === 0) return "That day is not available.";
+
+  const containingInterval = openIntervals.find(
+    (interval) => start >= interval.start && start + slotMinutes <= interval.end
+  );
+  if (!containingInterval) return "Appointment time is outside availability.";
+
+  if ((start - containingInterval.start) % slotMinutes !== 0) {
+    return "Appointment time does not match an open slot.";
   }
+
   return null;
 }
 
@@ -189,20 +204,61 @@ export const updateSettings = asyncHandler(async (req, res) => {
   const hasOwn = (field) => Object.prototype.hasOwnProperty.call(req.body || {}, field);
   const slotMinutes = Number(req.body?.slotMinutes ?? settings.slotMinutes);
   const bookingHorizonDays = Number(req.body?.bookingHorizonDays ?? settings.bookingHorizonDays);
+
   if (!Number.isInteger(slotMinutes) || slotMinutes < 15 || slotMinutes > 240) {
     return res.status(400).json({ message: "Slot length must be between 15 and 240 minutes." });
   }
   if (!Number.isInteger(bookingHorizonDays) || bookingHorizonDays < 1 || bookingHorizonDays > 31) {
     return res.status(400).json({ message: "Booking horizon must be between 1 and 31 days." });
   }
+
+  const newOverrides = hasOwn("dayOverrides") ? normalizeDayOverrides(req.body.dayOverrides) : null;
+
+  // Warn if new day overrides would leave active appointments outside any open block
+  const warnings = [];
+  if (newOverrides !== null) {
+    const dates = newOverrides.map((o) => o.date);
+    if (dates.length > 0) {
+      const affected = await Appointment.find({
+        appointmentDate: { $in: dates },
+        status: { $in: ACTIVE_STATUSES }
+      }).lean();
+
+      for (const appt of affected) {
+        const override = newOverrides.find((o) => o.date === appt.appointmentDate);
+        if (!override) continue;
+        const openIntervals = override.blocks
+          .filter((b) => b.status === "open")
+          .map((b) => ({ start: parseTime(b.startTime), end: parseTime(b.endTime) }))
+          .filter((i) => i.start !== null && i.end !== null);
+        const apptStart = parseTime(appt.startTime);
+        const apptEnd = parseTime(appt.endTime);
+        const covered = openIntervals.some((i) => apptStart >= i.start && apptEnd <= i.end);
+        if (!covered) {
+          warnings.push({
+            appointmentId: String(appt._id),
+            appointmentDate: appt.appointmentDate,
+            startTime: appt.startTime,
+            customerName: appt.customerName
+          });
+        }
+      }
+    }
+  }
+
   settings.slotMinutes = slotMinutes;
   settings.bookingHorizonDays = bookingHorizonDays;
   settings.weeklyAvailability = normalizeAvailability(
     hasOwn("weeklyAvailability") ? req.body.weeklyAvailability : settings.weeklyAvailability
   );
-  settings.dayBlocks = normalizeBlocks(hasOwn("dayBlocks") ? req.body.dayBlocks : settings.dayBlocks);
+  settings.dayOverrides = newOverrides !== null
+    ? newOverrides
+    : normalizeDayOverrides(settings.dayOverrides);
   await settings.save();
-  res.json(serializeSettings(settings));
+
+  const response = serializeSettings(settings);
+  if (warnings.length > 0) response.warnings = warnings;
+  res.json(response);
 });
 
 export const list = asyncHandler(async (req, res) => {

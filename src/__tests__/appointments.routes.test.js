@@ -34,14 +34,24 @@ async function getToken() {
   return loginRes.body.token;
 }
 
+// 2026-05-18 is a Monday; default Mon–Fri 10:00–17:00 with 120-min slots → 3 slots
 describe("appointments", () => {
   it("returns public availability and allows public booking", async () => {
-    const availability = await request(app).get("/api/appointments/public/availability?from=2026-05-18&days=1");
+    const availability = await request(app).get(
+      "/api/appointments/public/availability?from=2026-05-18&days=1"
+    );
     expect(availability.status).toBe(200);
     expect(availability.body.slots[0].date).toBe("2026-05-18");
     expect(availability.body.settings.slotMinutes).toBe(120);
     expect(availability.body.slots[0].slots).toHaveLength(3);
     expect(availability.body.slots[0].slots[0]).toEqual({ startTime: "10:00", endTime: "12:00" });
+
+    // Verify weeklyAvailability uses new block format
+    const monday = availability.body.settings.weeklyAvailability.find((d) => d.day === 1);
+    expect(monday).toMatchObject({
+      day: 1,
+      blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }]
+    });
 
     const slot = availability.body.slots[0].slots[0];
     const created = await request(app)
@@ -82,6 +92,8 @@ describe("appointments", () => {
     expect(unauthenticated.status).toBe(401);
 
     const token = await getToken();
+
+    // Update settings with new block format
     const settings = await request(app)
       .put("/api/appointments/settings")
       .set("Authorization", `Bearer ${token}`)
@@ -89,20 +101,26 @@ describe("appointments", () => {
         slotMinutes: 60,
         bookingHorizonDays: 7,
         weeklyAvailability: [
-          { day: 1, enabled: true, startTime: "09:00", endTime: "12:00" }
+          { day: 1, blocks: [{ startTime: "09:00", endTime: "12:00", status: "open" }] }
         ],
-        dayBlocks: [{ date: "2026-05-19", reason: "Closed" }]
+        // Empty blocks on day override = full day closed
+        dayOverrides: [{ date: "2026-05-19", blocks: [], reason: "Closed" }]
       });
     expect(settings.status).toBe(200);
     expect(settings.body.slotMinutes).toBe(60);
-    expect(settings.body.dayBlocks).toHaveLength(1);
+    expect(settings.body.dayOverrides).toHaveLength(1);
+    expect(settings.body.dayOverrides[0]).toMatchObject({ date: "2026-05-19", blocks: [], reason: "Closed" });
 
-    const availability = await request(app).get("/api/appointments/public/availability?from=2026-05-18&days=2");
+    // 2026-05-18 (Mon) → 09:00–12:00 open, 60-min slots → 3 slots
+    // 2026-05-19 (Tue) → day override with no blocks → 0 slots
+    const availability = await request(app).get(
+      "/api/appointments/public/availability?from=2026-05-18&days=2"
+    );
     expect(availability.body.slots[0].slots).toHaveLength(3);
     expect(availability.body.slots[1].slots).toHaveLength(0);
   });
 
-  it("preserves existing availability and blocks when settings are partially updated", async () => {
+  it("preserves existing availability and overrides when settings are partially updated", async () => {
     const token = await getToken();
 
     const initial = await request(app)
@@ -112,12 +130,13 @@ describe("appointments", () => {
         slotMinutes: 60,
         bookingHorizonDays: 10,
         weeklyAvailability: [
-          { day: 1, enabled: true, startTime: "09:00", endTime: "11:00" }
+          { day: 1, blocks: [{ startTime: "09:00", endTime: "11:00", status: "open" }] }
         ],
-        dayBlocks: [{ date: "2026-05-20", reason: "Closed" }]
+        dayOverrides: [{ date: "2026-05-20", blocks: [], reason: "Closed" }]
       });
     expect(initial.status).toBe(200);
 
+    // Partial update — only bookingHorizonDays
     const updated = await request(app)
       .put("/api/appointments/settings")
       .set("Authorization", `Bearer ${token}`)
@@ -127,39 +146,47 @@ describe("appointments", () => {
     expect(updated.body.bookingHorizonDays).toBe(12);
     expect(updated.body.slotMinutes).toBe(60);
     expect(updated.body.weeklyAvailability.find((item) => item.day === 1)).toMatchObject({
-      enabled: true,
-      startTime: "09:00",
-      endTime: "11:00"
+      day: 1,
+      blocks: [{ startTime: "09:00", endTime: "11:00", status: "open" }]
     });
-    expect(updated.body.dayBlocks).toEqual([{ date: "2026-05-20", startTime: "", endTime: "", reason: "Closed" }]);
+    expect(updated.body.dayOverrides).toEqual([{ date: "2026-05-20", blocks: [], reason: "Closed" }]);
   });
 
-  it("hides and rejects appointments that overlap manual time blocks", async () => {
+  it("uses day overrides and rejects booking outside open blocks", async () => {
     const token = await getToken();
+
+    // Day override for 2026-05-18: open 10:00–12:00, blocked 12:00–14:00, open 14:00–17:00
     const settings = await request(app)
       .put("/api/appointments/settings")
       .set("Authorization", `Bearer ${token}`)
       .send({
         slotMinutes: 120,
         bookingHorizonDays: 7,
-        weeklyAvailability: [
-          { day: 1, enabled: true, startTime: "10:00", endTime: "17:00" }
-        ],
-        dayBlocks: [{ date: "2026-05-18", startTime: "12:00", endTime: "14:00", reason: "Lunch" }]
+        dayOverrides: [
+          {
+            date: "2026-05-18",
+            reason: "Split day",
+            blocks: [
+              { startTime: "10:00", endTime: "12:00", status: "open" },
+              { startTime: "12:00", endTime: "14:00", status: "blocked" },
+              { startTime: "14:00", endTime: "17:00", status: "open" }
+            ]
+          }
+        ]
       });
     expect(settings.status).toBe(200);
-    expect(settings.body.dayBlocks[0]).toMatchObject({
-      date: "2026-05-18",
-      startTime: "12:00",
-      endTime: "14:00"
-    });
+    expect(settings.body.dayOverrides[0].blocks).toHaveLength(3);
 
-    const availability = await request(app).get("/api/appointments/public/availability?from=2026-05-18&days=1");
+    // Slots: open 10:00–12:00 → one 2h slot; open 14:00–17:00 → one 2h slot (14:00–16:00)
+    const availability = await request(app).get(
+      "/api/appointments/public/availability?from=2026-05-18&days=1"
+    );
     expect(availability.body.slots[0].slots).toEqual([
       { startTime: "10:00", endTime: "12:00" },
       { startTime: "14:00", endTime: "16:00" }
     ]);
 
+    // Booking at 12:00 should fail — falls in the blocked interval (outside any open block)
     const blocked = await request(app)
       .post("/api/appointments/public")
       .send({
@@ -172,7 +199,39 @@ describe("appointments", () => {
         issueDescription: "No signal"
       });
     expect(blocked.status).toBe(400);
-    expect(blocked.body.message).toBe("That time is blocked.");
+    expect(blocked.body.message).toBe("Appointment time is outside availability.");
+  });
+
+  it("warns when a day override blocks an active appointment", async () => {
+    const token = await getToken();
+
+    // Book an appointment first
+    await request(app)
+      .post("/api/appointments/public")
+      .send({
+        appointmentDate: "2026-05-18",
+        startTime: "10:00",
+        customerName: "Existing Customer",
+        customerPhone: "555-9999",
+        customerAddress: "1 Main St",
+        deviceType: "Switch",
+        issueDescription: "Cracked screen"
+      });
+
+    // Now override that day to close it entirely — should trigger a warning
+    const settings = await request(app)
+      .put("/api/appointments/settings")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        dayOverrides: [{ date: "2026-05-18", blocks: [], reason: "Emergency closure" }]
+      });
+    expect(settings.status).toBe(200);
+    expect(settings.body.warnings).toHaveLength(1);
+    expect(settings.body.warnings[0]).toMatchObject({
+      appointmentDate: "2026-05-18",
+      startTime: "10:00",
+      customerName: "Existing Customer"
+    });
   });
 
   it("sends a confirmation email when an appointment is confirmed", async () => {

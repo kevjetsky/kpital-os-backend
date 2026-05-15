@@ -1,20 +1,26 @@
 import mongoose from "mongoose";
 
-const availabilityWindowSchema = new mongoose.Schema(
+const availabilityBlockSchema = new mongoose.Schema(
   {
-    day: { type: Number, required: true, min: 0, max: 6 },
-    enabled: { type: Boolean, required: true, default: false },
-    startTime: { type: String, required: true, default: "10:00", trim: true },
-    endTime: { type: String, required: true, default: "17:00", trim: true }
+    startTime: { type: String, required: true, trim: true },
+    endTime: { type: String, required: true, trim: true },
+    status: { type: String, required: true, enum: ["open", "blocked"], default: "open" }
   },
   { _id: false }
 );
 
-const dayBlockSchema = new mongoose.Schema(
+const availabilityDaySchema = new mongoose.Schema(
+  {
+    day: { type: Number, required: true, min: 0, max: 6 },
+    blocks: { type: [availabilityBlockSchema], default: [] }
+  },
+  { _id: false }
+);
+
+const dayOverrideSchema = new mongoose.Schema(
   {
     date: { type: String, required: true, trim: true },
-    startTime: { type: String, default: "", trim: true },
-    endTime: { type: String, default: "", trim: true },
+    blocks: { type: [availabilityBlockSchema], default: [] },
     reason: { type: String, default: "", trim: true }
   },
   { _id: false }
@@ -25,8 +31,8 @@ const appointmentSettingsSchema = new mongoose.Schema(
     key: { type: String, required: true, unique: true, default: "main" },
     slotMinutes: { type: Number, required: true, default: 120 },
     bookingHorizonDays: { type: Number, required: true, default: 14 },
-    weeklyAvailability: { type: [availabilityWindowSchema], default: undefined },
-    dayBlocks: { type: [dayBlockSchema], default: [] }
+    weeklyAvailability: { type: [availabilityDaySchema], default: undefined },
+    dayOverrides: { type: [dayOverrideSchema], default: [] }
   },
   { timestamps: true }
 );
