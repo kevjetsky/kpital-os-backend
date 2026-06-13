@@ -34,7 +34,7 @@ async function getToken() {
   return loginRes.body.token;
 }
 
-// 2026-05-18 is a Monday; default Mon–Fri 10:00–17:00 with 120-min slots → 3 slots
+// 2026-05-18 is a Monday; default daily split schedule with 30-min slots -> 10 slots
 describe("appointments", () => {
   it("returns public availability and allows public booking", async () => {
     const availability = await request(app).get(
@@ -42,15 +42,20 @@ describe("appointments", () => {
     );
     expect(availability.status).toBe(200);
     expect(availability.body.slots[0].date).toBe("2026-05-18");
-    expect(availability.body.settings.slotMinutes).toBe(120);
-    expect(availability.body.slots[0].slots).toHaveLength(3);
-    expect(availability.body.slots[0].slots[0]).toEqual({ startTime: "10:00", endTime: "12:00" });
+    expect(availability.body.settings.slotMinutes).toBe(30);
+    expect(availability.body.slots[0].slots).toHaveLength(10);
+    expect(availability.body.slots[0].slots[0]).toEqual({ startTime: "07:30", endTime: "08:00" });
+    expect(availability.body.slots[0].slots.at(-1)).toEqual({ startTime: "21:00", endTime: "21:30" });
 
     // Verify weeklyAvailability uses new block format
     const monday = availability.body.settings.weeklyAvailability.find((d) => d.day === 1);
     expect(monday).toMatchObject({
       day: 1,
-      blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }]
+      blocks: [
+        { startTime: "07:30", endTime: "09:00", status: "open" },
+        { startTime: "09:00", endTime: "18:00", status: "blocked" },
+        { startTime: "18:00", endTime: "21:30", status: "open" }
+      ]
     });
 
     const slot = availability.body.slots[0].slots[0];
@@ -210,7 +215,7 @@ describe("appointments", () => {
       .post("/api/appointments/public")
       .send({
         appointmentDate: "2026-05-18",
-        startTime: "10:00",
+        startTime: "07:30",
         customerName: "Existing Customer",
         customerPhone: "555-9999",
         customerAddress: "1 Main St",
@@ -229,7 +234,7 @@ describe("appointments", () => {
     expect(settings.body.warnings).toHaveLength(1);
     expect(settings.body.warnings[0]).toMatchObject({
       appointmentDate: "2026-05-18",
-      startTime: "10:00",
+      startTime: "07:30",
       customerName: "Existing Customer"
     });
   });
@@ -247,7 +252,7 @@ describe("appointments", () => {
       .post("/api/appointments/public")
       .send({
         appointmentDate: "2026-05-18",
-        startTime: "10:00",
+        startTime: "07:30",
         customerName: "Email Customer",
         customerPhone: "555-4444",
         customerAddress: "900 Email St",

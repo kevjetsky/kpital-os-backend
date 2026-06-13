@@ -1,5 +1,7 @@
 import mongoose from "mongoose";
 import { Entry } from "../models/Entry.js";
+import { InventoryItem } from "../models/InventoryItem.js";
+import { InventoryTransaction } from "../models/InventoryTransaction.js";
 import {
   asyncHandler,
   parseMoneyInput,
@@ -17,6 +19,118 @@ import {
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE
 } from "../constants.js";
+
+function serializeUsageKey(itemId) {
+  return String(itemId || "").trim();
+}
+
+function bodyHas(body, key) {
+  return Object.prototype.hasOwnProperty.call(body || {}, key);
+}
+
+async function normalizeInventoryUsage(input) {
+  if (!Array.isArray(input)) return { usage: [], inventoryCost: 0, error: null };
+
+  const aggregated = new Map();
+  for (const raw of input) {
+    const itemId = serializeUsageKey(raw?.itemId);
+    if (!mongoose.Types.ObjectId.isValid(itemId)) {
+      return { usage: [], inventoryCost: 0, error: "Invalid inventory item id." };
+    }
+    const parsedQuantity = parseMoneyInput(raw?.quantity, "Inventory quantity");
+    if (parsedQuantity.error || parsedQuantity.value <= 0) {
+      return { usage: [], inventoryCost: 0, error: "Inventory quantity must be a positive number." };
+    }
+    aggregated.set(itemId, roundMoney((aggregated.get(itemId) || 0) + parsedQuantity.value));
+  }
+
+  if (aggregated.size === 0) return { usage: [], inventoryCost: 0, error: null };
+
+  const items = await InventoryItem.find({ _id: { $in: Array.from(aggregated.keys()) } });
+  const itemsById = new Map(items.map((item) => [String(item._id), item]));
+  const usage = [];
+  let inventoryCost = 0;
+
+  for (const [itemId, quantity] of aggregated) {
+    const item = itemsById.get(itemId);
+    if (!item) return { usage: [], inventoryCost: 0, error: "Inventory item not found." };
+    const costPerUnit = roundMoney(item.costPerUnit || 0);
+    const totalCost = roundMoney(quantity * costPerUnit);
+    inventoryCost = roundMoney(inventoryCost + totalCost);
+    usage.push({
+      itemId,
+      name: item.name,
+      sku: item.sku,
+      quantity,
+      costPerUnit,
+      totalCost
+    });
+  }
+
+  return { usage, inventoryCost, error: null };
+}
+
+function usageQuantityMap(usage = []) {
+  const map = new Map();
+  for (const item of usage || []) {
+    const itemId = serializeUsageKey(item.itemId);
+    if (!itemId) continue;
+    map.set(itemId, roundMoney((map.get(itemId) || 0) + Number(item.quantity || 0)));
+  }
+  return map;
+}
+
+async function reconcileInventoryUsage(previousUsage, nextUsage, reason) {
+  const previous = usageQuantityMap(previousUsage);
+  const next = usageQuantityMap(nextUsage);
+  const itemIds = Array.from(new Set([...previous.keys(), ...next.keys()]));
+
+  for (const itemId of itemIds) {
+    const delta = roundMoney((next.get(itemId) || 0) - (previous.get(itemId) || 0));
+    if (delta === 0) continue;
+
+    const item = await InventoryItem.findById(itemId);
+    if (!item) throw Object.assign(new Error("Inventory item not found."), { status: 400 });
+    const quantityBefore = item.quantity;
+    const quantityAfter = roundMoney(quantityBefore - delta);
+    if (quantityAfter < 0) {
+      throw Object.assign(new Error(`Not enough stock for ${item.name}.`), { status: 400 });
+    }
+
+    item.quantity = quantityAfter;
+    await item.save();
+    await InventoryTransaction.create({
+      itemId: item._id,
+      type: delta > 0 ? "out" : "in",
+      quantity: Math.abs(delta),
+      reason,
+      quantityBefore,
+      quantityAfter
+    });
+  }
+}
+
+async function assertInventoryUsageAvailable(previousUsage, nextUsage) {
+  const previous = usageQuantityMap(previousUsage);
+  const next = usageQuantityMap(nextUsage);
+  const itemIds = Array.from(new Set([...previous.keys(), ...next.keys()]));
+  for (const itemId of itemIds) {
+    const delta = roundMoney((next.get(itemId) || 0) - (previous.get(itemId) || 0));
+    if (delta <= 0) continue;
+    const item = await InventoryItem.findById(itemId).lean();
+    if (!item) throw Object.assign(new Error("Inventory item not found."), { status: 400 });
+    if (roundMoney((item.quantity || 0) - delta) < 0) {
+      throw Object.assign(new Error(`Not enough stock for ${item.name}.`), { status: 400 });
+    }
+  }
+}
+
+function parseOptionalEntryObjectId(rawValue, label) {
+  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === "") return { value: null, error: null };
+  const value = String(rawValue).trim();
+  if (!mongoose.Types.ObjectId.isValid(value)) return { value: null, error: `Invalid ${label} id.` };
+  return { value, error: null };
+}
 
 export const list = asyncHandler(async (req, res) => {
   const { type, status, page, limit, search } = req.query;
@@ -120,7 +234,17 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: parsedExpense.error });
   }
   const income = parsedIncome.value;
-  const expense = parsedExpense.value;
+  const manualExpense = parsedExpense.value;
+
+  const inventory = await normalizeInventoryUsage(body.inventoryUsage);
+  if (inventory.error) {
+    return res.status(400).json({ message: inventory.error });
+  }
+
+  const appointmentRef = parseOptionalEntryObjectId(body.appointmentId, "appointment");
+  if (appointmentRef.error) {
+    return res.status(400).json({ message: appointmentRef.error });
+  }
 
   let customerName = String(body.customerName || "").trim();
   let customerPhone = String(body.customerPhone || "").trim();
@@ -181,7 +305,9 @@ export const create = asyncHandler(async (req, res) => {
   }
 
   const rawTaxRate = body.taxRate !== undefined ? Number(body.taxRate) : undefined;
+  const expense = roundMoney(manualExpense + inventory.inventoryCost);
   const amounts = computeAmounts(income, expense, type, rawTaxRate);
+  await assertInventoryUsageAvailable([], inventory.usage);
 
   const entry = await Entry.create({
     date,
@@ -197,11 +323,15 @@ export const create = asyncHandler(async (req, res) => {
     productServiceType,
     productServicePrice,
     productServiceOptionId,
+    appointmentId: appointmentRef.value,
+    inventoryUsage: inventory.usage,
+    inventoryCost: inventory.inventoryCost,
     ...amounts,
     notes,
     category,
     status
   });
+  await reconcileInventoryUsage([], inventory.usage, `Used on record ${entry._id}`);
 
   return res.status(201).json(entry);
 });
@@ -228,7 +358,7 @@ export const update = asyncHandler(async (req, res) => {
   }
 
   let description = existing.description || "";
-  if (Object.prototype.hasOwnProperty.call(req.body, "description")) {
+  if (bodyHas(req.body, "description")) {
     description = String(req.body.description || "").trim();
   }
 
@@ -241,13 +371,30 @@ export const update = asyncHandler(async (req, res) => {
 
   const parsedExpense = req.body.expense !== undefined
     ? parseMoneyInput(req.body.expense, "Expense")
-    : { value: existing.expense, error: null };
+    : { value: roundMoney((existing.expense || 0) - (existing.inventoryCost || 0)), error: null };
   if (parsedExpense.error) {
     return res.status(400).json({ message: parsedExpense.error });
   }
 
   const income = parsedIncome.value;
-  const expense = parsedExpense.value;
+  const manualExpense = parsedExpense.value;
+  const inventory = bodyHas(req.body, "inventoryUsage")
+    ? await normalizeInventoryUsage(req.body.inventoryUsage)
+    : {
+        usage: existing.inventoryUsage || [],
+        inventoryCost: Number(existing.inventoryCost || 0),
+        error: null
+      };
+  if (inventory.error) {
+    return res.status(400).json({ message: inventory.error });
+  }
+
+  const appointmentRef = bodyHas(req.body, "appointmentId")
+    ? parseOptionalEntryObjectId(req.body.appointmentId, "appointment")
+    : { value: existing.appointmentId || null, error: null };
+  if (appointmentRef.error) {
+    return res.status(400).json({ message: appointmentRef.error });
+  }
   const status = req.body.status !== undefined ? toStatus(req.body.status) : existing.status;
   if (!status) {
     return res.status(400).json({ message: "Status must be Pending, Completed, or Paid." });
@@ -268,41 +415,41 @@ export const update = asyncHandler(async (req, res) => {
   let productServicePrice = Number.isFinite(existing.productServicePrice) ? existing.productServicePrice : 0;
   let productServiceOptionId = existing.productServiceOptionId ? String(existing.productServiceOptionId) : null;
 
-  if (Object.prototype.hasOwnProperty.call(req.body, "customerName")) {
+  if (bodyHas(req.body, "customerName")) {
     customerName = String(req.body.customerName || "").trim();
-    if (!Object.prototype.hasOwnProperty.call(req.body, "customerOptionId")) {
+    if (!bodyHas(req.body, "customerOptionId")) {
       customerOptionId = null;
     }
   }
 
-  if (Object.prototype.hasOwnProperty.call(req.body, "customerPhone")) {
+  if (bodyHas(req.body, "customerPhone")) {
     customerPhone = String(req.body.customerPhone || "").trim();
   }
 
-  if (Object.prototype.hasOwnProperty.call(req.body, "customerEmail")) {
+  if (bodyHas(req.body, "customerEmail")) {
     customerEmail = String(req.body.customerEmail || "").trim();
   }
 
-  if (Object.prototype.hasOwnProperty.call(req.body, "customerAddress")) {
+  if (bodyHas(req.body, "customerAddress")) {
     customerAddress = String(req.body.customerAddress || "").trim();
   }
 
-  if (Object.prototype.hasOwnProperty.call(req.body, "customerReference")) {
+  if (bodyHas(req.body, "customerReference")) {
     customerReferenceLabel = String(req.body.customerReference || "").trim();
   }
 
-  if (Object.prototype.hasOwnProperty.call(req.body, "productServiceName")) {
+  if (bodyHas(req.body, "productServiceName")) {
     productServiceName = String(req.body.productServiceName || "").trim();
-    if (!Object.prototype.hasOwnProperty.call(req.body, "productServiceOptionId")) {
+    if (!bodyHas(req.body, "productServiceOptionId")) {
       productServiceOptionId = null;
     }
   }
 
-  if (Object.prototype.hasOwnProperty.call(req.body, "productServiceType")) {
+  if (bodyHas(req.body, "productServiceType")) {
     productServiceType = toProductServiceType(req.body.productServiceType);
   }
 
-  if (Object.prototype.hasOwnProperty.call(req.body, "productServicePrice")) {
+  if (bodyHas(req.body, "productServicePrice")) {
     const parsedPrice = parseMoneyInput(req.body.productServicePrice, "Product/service price");
     if (parsedPrice.error) {
       return res.status(400).json({ message: parsedPrice.error });
@@ -310,7 +457,7 @@ export const update = asyncHandler(async (req, res) => {
     productServicePrice = parsedPrice.value;
   }
 
-  if (Object.prototype.hasOwnProperty.call(req.body, "customerOptionId")) {
+  if (bodyHas(req.body, "customerOptionId")) {
     const customerRefOption = await resolveReferenceOption("customer", req.body.customerOptionId);
     if (customerRefOption.error) {
       return res.status(400).json({ message: customerRefOption.error });
@@ -318,19 +465,19 @@ export const update = asyncHandler(async (req, res) => {
 
     if (!customerRefOption.option) {
       customerOptionId = null;
-      if (!Object.prototype.hasOwnProperty.call(req.body, "customerName")) {
+      if (!bodyHas(req.body, "customerName")) {
         customerName = "";
       }
-      if (!Object.prototype.hasOwnProperty.call(req.body, "customerPhone")) {
+      if (!bodyHas(req.body, "customerPhone")) {
         customerPhone = "";
       }
-      if (!Object.prototype.hasOwnProperty.call(req.body, "customerEmail")) {
+      if (!bodyHas(req.body, "customerEmail")) {
         customerEmail = "";
       }
-      if (!Object.prototype.hasOwnProperty.call(req.body, "customerAddress")) {
+      if (!bodyHas(req.body, "customerAddress")) {
         customerAddress = "";
       }
-      if (!Object.prototype.hasOwnProperty.call(req.body, "customerReference")) {
+      if (!bodyHas(req.body, "customerReference")) {
         customerReferenceLabel = "";
       }
     } else {
@@ -343,7 +490,7 @@ export const update = asyncHandler(async (req, res) => {
     }
   }
 
-  if (Object.prototype.hasOwnProperty.call(req.body, "productServiceOptionId")) {
+  if (bodyHas(req.body, "productServiceOptionId")) {
     const productServiceReference = await resolveReferenceOption("product_service", req.body.productServiceOptionId);
     if (productServiceReference.error) {
       return res.status(400).json({ message: productServiceReference.error });
@@ -351,13 +498,13 @@ export const update = asyncHandler(async (req, res) => {
 
     if (!productServiceReference.option) {
       productServiceOptionId = null;
-      if (!Object.prototype.hasOwnProperty.call(req.body, "productServiceName")) {
+      if (!bodyHas(req.body, "productServiceName")) {
         productServiceName = "";
       }
-      if (!Object.prototype.hasOwnProperty.call(req.body, "productServiceType")) {
+      if (!bodyHas(req.body, "productServiceType")) {
         productServiceType = "";
       }
-      if (!Object.prototype.hasOwnProperty.call(req.body, "productServicePrice")) {
+      if (!bodyHas(req.body, "productServicePrice")) {
         productServicePrice = 0;
       }
     } else {
@@ -387,7 +534,10 @@ export const update = asyncHandler(async (req, res) => {
   }
 
   const rawTaxRate = req.body.taxRate !== undefined ? Number(req.body.taxRate) : undefined;
+  const expense = roundMoney(manualExpense + inventory.inventoryCost);
   const amounts = computeAmounts(income, expense, type, rawTaxRate);
+  const previousUsage = existing.inventoryUsage ? existing.inventoryUsage.map((item) => item.toObject ? item.toObject() : item) : [];
+  await assertInventoryUsageAvailable(previousUsage, inventory.usage);
 
   existing.date = date;
   existing.type = type;
@@ -406,11 +556,15 @@ export const update = asyncHandler(async (req, res) => {
   existing.productServiceType = productServiceType;
   existing.productServicePrice = productServicePrice;
   existing.productServiceOptionId = productServiceOptionId;
+  existing.appointmentId = appointmentRef.value;
+  existing.inventoryUsage = inventory.usage;
+  existing.inventoryCost = inventory.inventoryCost;
   existing.status = status || "Pending";
   existing.notes = notes;
   existing.category = category;
 
   await existing.save();
+  await reconcileInventoryUsage(previousUsage, inventory.usage, `Updated record ${existing._id}`);
   return res.json(existing);
 });
 
@@ -424,6 +578,7 @@ export const remove = asyncHandler(async (req, res) => {
   if (!deleted) {
     return res.status(404).json({ message: "Entry not found." });
   }
+  await reconcileInventoryUsage(deleted.inventoryUsage || [], [], `Deleted record ${deleted._id}`);
 
   return res.json({ ok: true });
 });

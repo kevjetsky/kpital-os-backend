@@ -27,6 +27,18 @@ const entrySchema = new mongoose.Schema(
     },
     productServicePrice: { type: Number, required: true, default: 0 },
     productServiceOptionId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    appointmentId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    inventoryUsage: [
+      {
+        itemId: { type: mongoose.Schema.Types.ObjectId, ref: "InventoryItem", required: true },
+        name: { type: String, default: "", trim: true },
+        sku: { type: String, default: "", trim: true },
+        quantity: { type: Number, required: true },
+        costPerUnit: { type: Number, required: true, default: 0 },
+        totalCost: { type: Number, required: true, default: 0 }
+      }
+    ],
+    inventoryCost: { type: Number, required: true, default: 0 },
     notes: { type: String, default: "", trim: true },
     category: { type: String, default: "", trim: true },
     payments: [

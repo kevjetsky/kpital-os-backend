@@ -5,6 +5,7 @@ export default defineConfig({
     environment: "node",
     globals: true,
     hookTimeout: 120000,
-    testTimeout: 30000
+    testTimeout: 30000,
+    fileParallelism: false
   }
 });

@@ -1,16 +1,6 @@
 import jwt from "jsonwebtoken";
-
-const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || "kpital_token";
-
-function getBearerToken(req) {
-  const header = req.headers.authorization || "";
-  if (!header.toLowerCase().startsWith("bearer ")) {
-    return null;
-  }
-
-  const token = header.slice(7).trim();
-  return token || null;
-}
+import { getBearerToken } from "../utils.js";
+import { AUTH_COOKIE_NAME } from "../constants.js";
 
 export function requireAuth(req, res, next) {
   const token = getBearerToken(req) || req.cookies[AUTH_COOKIE_NAME];

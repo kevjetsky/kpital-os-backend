@@ -20,7 +20,7 @@ function formatSlotTime(time) {
   return `${hour % 12 || 12}:${match[2]}${hour >= 12 ? "pm" : "am"}`;
 }
 
-export async function sendAppointmentConfirmation(appointment) {
+async function sendAppointmentEmail({ appointment, subjectPrefix, heading, intro }) {
   const apiKey = process.env.RESEND_API_KEY;
   const from = process.env.RESEND_FROM_EMAIL || "Kpital OS <onboarding@resend.dev>";
   const to = String(appointment.customerEmail || "").trim();
@@ -32,9 +32,9 @@ export async function sendAppointmentConfirmation(appointment) {
   const appointmentTime = `${formatDate(appointment.appointmentDate)} at ${formatSlotTime(appointment.startTime)}`;
   const html = `
     <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111827">
-      <h2 style="margin:0 0 12px">Appointment confirmed</h2>
+      <h2 style="margin:0 0 12px">${escapeHtml(heading)}</h2>
       <p>Hi ${escapeHtml(appointment.customerName)},</p>
-      <p>Your appointment has been confirmed for <strong>${escapeHtml(appointmentTime)}</strong>.</p>
+      <p>${escapeHtml(intro)} <strong>${escapeHtml(appointmentTime)}</strong>.</p>
       <p><strong>Device:</strong> ${escapeHtml(appointment.deviceType)}</p>
       <p><strong>Issue:</strong> ${escapeHtml(appointment.issueDescription)}</p>
       <p>If you need to change anything, reply to this email or contact us directly.</p>
@@ -50,15 +50,33 @@ export async function sendAppointmentConfirmation(appointment) {
     body: JSON.stringify({
       from,
       to: [to],
-      subject: `Appointment confirmed: ${appointmentTime}`,
+      subject: `${subjectPrefix}: ${appointmentTime}`,
       html
     })
   });
 
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(body?.message || "Failed to send confirmation email.");
+    throw new Error(body?.message || "Failed to send appointment email.");
   }
 
   return { sent: true, id: body?.id || "" };
+}
+
+export function sendAppointmentConfirmation(appointment) {
+  return sendAppointmentEmail({
+    appointment,
+    subjectPrefix: "Appointment confirmed",
+    heading: "Appointment confirmed",
+    intro: "Your appointment has been confirmed for"
+  });
+}
+
+export function sendAppointmentReminder(appointment) {
+  return sendAppointmentEmail({
+    appointment,
+    subjectPrefix: "Appointment reminder",
+    heading: "Appointment reminder",
+    intro: "This is a reminder for your appointment on"
+  });
 }

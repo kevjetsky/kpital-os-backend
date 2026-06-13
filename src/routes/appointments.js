@@ -10,5 +10,6 @@ router.get("/settings", requireAuth, appointments.getSettings);
 router.put("/settings", requireAuth, appointments.updateSettings);
 router.get("/", requireAuth, appointments.list);
 router.patch("/:id", requireAuth, appointments.update);
+router.post("/:id/reminder", requireAuth, appointments.sendReminder);
 
 export default router;

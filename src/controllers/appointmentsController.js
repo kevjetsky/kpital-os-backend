@@ -1,21 +1,29 @@
 import mongoose from "mongoose";
 import { Appointment } from "../models/Appointment.js";
 import { AppointmentSettings } from "../models/AppointmentSettings.js";
-import { sendAppointmentConfirmation } from "../services/emailService.js";
+import { sendAppointmentConfirmation, sendAppointmentReminder } from "../services/emailService.js";
 import { asyncHandler } from "../utils.js";
 
 const APPOINTMENT_STATUSES = ["requested", "confirmed", "cancelled", "completed"];
 const ACTIVE_STATUSES = ["requested", "confirmed"];
-const DEFAULT_SLOT_MINUTES = 120;
+const DEFAULT_SLOT_MINUTES = 30;
 const DEFAULT_WEEKLY_AVAILABILITY = [
-  { day: 0, blocks: [] },
-  { day: 1, blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }] },
-  { day: 2, blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }] },
-  { day: 3, blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }] },
-  { day: 4, blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }] },
-  { day: 5, blocks: [{ startTime: "10:00", endTime: "17:00", status: "open" }] },
-  { day: 6, blocks: [] }
+  { day: 0, blocks: defaultAvailabilityBlocks() },
+  { day: 1, blocks: defaultAvailabilityBlocks() },
+  { day: 2, blocks: defaultAvailabilityBlocks() },
+  { day: 3, blocks: defaultAvailabilityBlocks() },
+  { day: 4, blocks: defaultAvailabilityBlocks() },
+  { day: 5, blocks: defaultAvailabilityBlocks() },
+  { day: 6, blocks: defaultAvailabilityBlocks() }
 ];
+
+function defaultAvailabilityBlocks() {
+  return [
+    { startTime: "07:30", endTime: "09:00", status: "open" },
+    { startTime: "09:00", endTime: "18:00", status: "blocked" },
+    { startTime: "18:00", endTime: "21:30", status: "open" }
+  ];
+}
 
 function dateKey(date) {
   return date.toISOString().slice(0, 10);
@@ -330,6 +338,23 @@ export const update = asyncHandler(async (req, res) => {
   }
 
   res.json({ ...appointment.toObject(), confirmationEmail });
+});
+
+export const sendReminder = asyncHandler(async (req, res) => {
+  const id = String(req.params?.id || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ message: "Invalid appointment id." });
+  }
+  const appointment = await Appointment.findById(id);
+  if (!appointment) return res.status(404).json({ message: "Appointment not found." });
+
+  try {
+    const reminderEmail = await sendAppointmentReminder(appointment);
+    res.json({ ok: true, reminderEmail });
+  } catch (err) {
+    console.error("appointment reminder email failed", err);
+    res.status(500).json({ message: "Failed to send reminder email." });
+  }
 });
 
 export const getPublicAvailability = asyncHandler(async (req, res) => {

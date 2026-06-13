@@ -5,6 +5,8 @@ node_modules
 .env.*.local
 dist
 coverage
+.turbo
 .DS_Store
 npm-debug.log*
+*.log
 app.yaml

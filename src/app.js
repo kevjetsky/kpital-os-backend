@@ -8,6 +8,7 @@ import entriesRouter from "./routes/entries.js";
 import referenceOptionsRouter from "./routes/referenceOptions.js";
 import inventoryRouter from "./routes/inventory.js";
 import appointmentsRouter from "./routes/appointments.js";
+import backupRouter from "./routes/backup.js";
 
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
 
@@ -66,6 +67,7 @@ app.use("/api/entries", entriesRouter);
 app.use("/api/reference-options", referenceOptionsRouter);
 app.use("/api/inventory", inventoryRouter);
 app.use("/api/appointments", appointmentsRouter);
+app.use("/api/backup", backupRouter);
 
 app.use((_req, res) => {
   res.status(404).json({ message: "Not found." });
