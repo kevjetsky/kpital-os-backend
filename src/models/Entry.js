@@ -27,7 +27,6 @@ const entrySchema = new mongoose.Schema(
     },
     productServicePrice: { type: Number, required: true, default: 0 },
     productServiceOptionId: { type: mongoose.Schema.Types.ObjectId, default: null },
-    appointmentId: { type: mongoose.Schema.Types.ObjectId, default: null },
     inventoryUsage: [
       {
         itemId: { type: mongoose.Schema.Types.ObjectId, ref: "InventoryItem", required: true },

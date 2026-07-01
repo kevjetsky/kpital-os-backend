@@ -1,6 +1,25 @@
 import "dotenv/config";
-import mongoose from "mongoose";
-import app from "./app.js";
+
+let Sentry = null;
+
+if (process.env.SENTRY_DSN) {
+  Sentry = await import("@sentry/node");
+  Sentry.init({
+    dsn: process.env.SENTRY_DSN,
+    environment: process.env.SENTRY_ENVIRONMENT || process.env.NODE_ENV || "development",
+    release: process.env.SENTRY_RELEASE || undefined,
+    tracesSampleRate: Number(process.env.SENTRY_TRACES_SAMPLE_RATE || 0),
+    sendDefaultPii: false,
+    enableLogs: true
+  });
+}
+
+console.log("Booting API...");
+
+const [{ default: mongoose }, { default: app }] = await Promise.all([
+  import("mongoose"),
+  import("./app.js")
+]);
 
 const port = Number(process.env.PORT || 4000);
 let server;
@@ -10,8 +29,28 @@ if (!process.env.JWT_SECRET) throw new Error("JWT_SECRET is required");
 if (!process.env.MONGODB_URI) throw new Error("MONGODB_URI is required");
 
 async function connectDatabase() {
+  const serverSelectionTimeoutMS = Number(process.env.MONGODB_SERVER_SELECTION_TIMEOUT_MS || 3000);
+  const connectTimeoutMS = Number(process.env.MONGODB_CONNECT_TIMEOUT_MS || 3000);
+  const useMemoryDb = process.env.USE_MEMORY_DB === "true";
+
+  if (useMemoryDb) {
+    console.log("Starting in-memory MongoDB for local development.");
+    const { MongoMemoryServer } = await import("mongodb-memory-server");
+    memoryServer = await MongoMemoryServer.create();
+    await mongoose.connect(memoryServer.getUri(), {
+      serverSelectionTimeoutMS,
+      connectTimeoutMS
+    });
+    console.log("Connected to in-memory MongoDB.");
+    return;
+  }
+
   try {
-    await mongoose.connect(process.env.MONGODB_URI);
+    await mongoose.connect(process.env.MONGODB_URI, {
+      serverSelectionTimeoutMS,
+      connectTimeoutMS
+    });
+    console.log("Connected to MongoDB.");
   } catch (error) {
     if (process.env.NODE_ENV === "production") {
       throw error;
@@ -20,7 +59,11 @@ async function connectDatabase() {
     console.warn("Configured MongoDB connection failed. Starting an in-memory database for local development.");
     const { MongoMemoryServer } = await import("mongodb-memory-server");
     memoryServer = await MongoMemoryServer.create();
-    await mongoose.connect(memoryServer.getUri());
+    await mongoose.connect(memoryServer.getUri(), {
+      serverSelectionTimeoutMS,
+      connectTimeoutMS
+    });
+    console.log("Connected to in-memory MongoDB.");
   }
 }
 
@@ -45,8 +88,13 @@ async function shutdown(signal) {
 }
 
 start().catch((error) => {
+  Sentry?.captureException(error);
   console.error("Failed to start API", error);
-  process.exit(1);
+  if (Sentry) {
+    void Sentry.flush(2000).finally(() => process.exit(1));
+  } else {
+    process.exit(1);
+  }
 });
 
 ["SIGINT", "SIGTERM"].forEach((signal) => {

@@ -5,9 +5,9 @@ import cookieParser from "cookie-parser";
 import morgan from "morgan";
 import authRouter from "./routes/auth.js";
 import entriesRouter from "./routes/entries.js";
+import recurringRouter from "./routes/recurring.js";
 import referenceOptionsRouter from "./routes/referenceOptions.js";
 import inventoryRouter from "./routes/inventory.js";
-import appointmentsRouter from "./routes/appointments.js";
 import backupRouter from "./routes/backup.js";
 
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
@@ -64,10 +64,15 @@ app.use(cookieParser());
 app.get("/api/health", (_, res) => res.json({ ok: true }));
 app.use("/api/auth", authRouter);
 app.use("/api/entries", entriesRouter);
+app.use("/api/recurring", recurringRouter);
 app.use("/api/reference-options", referenceOptionsRouter);
 app.use("/api/inventory", inventoryRouter);
-app.use("/api/appointments", appointmentsRouter);
 app.use("/api/backup", backupRouter);
+
+if (process.env.SENTRY_DSN) {
+  const Sentry = await import("@sentry/node");
+  Sentry.setupExpressErrorHandler(app);
+}
 
 app.use((_req, res) => {
   res.status(404).json({ message: "Not found." });

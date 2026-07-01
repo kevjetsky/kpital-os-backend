@@ -13,6 +13,10 @@ This service is ready to run on Google Cloud Run as a container.
 - `AUTH_COOKIE_NAME` defaults to `kpital_token`
 - `COOKIE_SECURE` defaults to `true` when `NODE_ENV=production`
 - `COOKIE_SAME_SITE` defaults to `lax`
+- `SENTRY_DSN` enables runtime error and request monitoring
+- `SENTRY_ENVIRONMENT` labels the release environment in Sentry
+- `SENTRY_RELEASE` tags events with the deployed version
+- `SENTRY_TRACES_SAMPLE_RATE` controls tracing volume, defaults to `0`
 
 For cross-site cookies between separate frontend and backend domains, use:
 
@@ -28,7 +32,7 @@ gcloud run deploy kpital-api \
   --source . \
   --region us-central1 \
   --allow-unauthenticated \
-  --set-env-vars NODE_ENV=production,CLIENT_ORIGIN=https://your-frontend-domain.com,COOKIE_SECURE=true,COOKIE_SAME_SITE=none \
+  --set-env-vars NODE_ENV=production,CLIENT_ORIGIN=https://your-frontend-domain.com,COOKIE_SECURE=true,COOKIE_SAME_SITE=none,SENTRY_ENVIRONMENT=production,SENTRY_TRACES_SAMPLE_RATE=0.1 \
   --update-secrets MONGODB_URI=MONGODB_URI:1,JWT_SECRET=JWT_SECRET:1
 ```
 
@@ -56,7 +60,7 @@ gcloud run deploy "${SERVICE_NAME}" \
   --platform managed \
   --region "${REGION}" \
   --allow-unauthenticated \
-  --set-env-vars NODE_ENV=production,CLIENT_ORIGIN=https://your-frontend-domain.com,COOKIE_SECURE=true,COOKIE_SAME_SITE=none \
+  --set-env-vars NODE_ENV=production,CLIENT_ORIGIN=https://your-frontend-domain.com,COOKIE_SECURE=true,COOKIE_SAME_SITE=none,SENTRY_ENVIRONMENT=production,SENTRY_TRACES_SAMPLE_RATE=0.1 \
   --update-secrets MONGODB_URI=MONGODB_URI:1,JWT_SECRET=JWT_SECRET:1
 ```
 
@@ -64,5 +68,6 @@ gcloud run deploy "${SERVICE_NAME}" \
 
 - Cloud Run injects `PORT`, and the API already listens on that port.
 - Store `MONGODB_URI` and `JWT_SECRET` in Secret Manager instead of committing them.
+- Store `SENTRY_DSN` in Secret Manager or pass it as a non-secret env var if your org policy allows it.
 - For environment variable secrets, pin a version such as `:1` instead of `:latest`.
 - `app.yaml` is for App Engine and is not used by the Docker-based Cloud Run deployment above.

@@ -5,21 +5,17 @@ import { Entry } from "../models/Entry.js";
 import { ReferenceOption } from "../models/ReferenceOption.js";
 import { InventoryItem } from "../models/InventoryItem.js";
 import { InventoryTransaction } from "../models/InventoryTransaction.js";
-import { Appointment } from "../models/Appointment.js";
-import { AppointmentSettings } from "../models/AppointmentSettings.js";
 
 const router = Router();
 
 // Full data export, excluding auth settings (password hash never leaves the server).
 router.get("/", requireAuth, asyncHandler(async (_req, res) => {
-  const [entries, referenceOptions, inventoryItems, inventoryTransactions, appointments, appointmentSettings] =
+  const [entries, referenceOptions, inventoryItems, inventoryTransactions] =
     await Promise.all([
       Entry.find().sort({ date: 1 }).lean(),
       ReferenceOption.find().lean(),
       InventoryItem.find().lean(),
-      InventoryTransaction.find().sort({ createdAt: 1 }).lean(),
-      Appointment.find().sort({ appointmentDate: 1 }).lean(),
-      AppointmentSettings.findOne().lean()
+      InventoryTransaction.find().sort({ createdAt: 1 }).lean()
     ]);
 
   res.json({
@@ -28,15 +24,12 @@ router.get("/", requireAuth, asyncHandler(async (_req, res) => {
       entries: entries.length,
       referenceOptions: referenceOptions.length,
       inventoryItems: inventoryItems.length,
-      inventoryTransactions: inventoryTransactions.length,
-      appointments: appointments.length
+      inventoryTransactions: inventoryTransactions.length
     },
     entries,
     referenceOptions,
     inventoryItems,
-    inventoryTransactions,
-    appointments,
-    appointmentSettings
+    inventoryTransactions
   });
 }));
 

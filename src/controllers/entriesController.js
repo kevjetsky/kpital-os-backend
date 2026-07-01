@@ -125,13 +125,6 @@ async function assertInventoryUsageAvailable(previousUsage, nextUsage) {
   }
 }
 
-function parseOptionalEntryObjectId(rawValue, label) {
-  if (rawValue === undefined || rawValue === null || String(rawValue).trim() === "") return { value: null, error: null };
-  const value = String(rawValue).trim();
-  if (!mongoose.Types.ObjectId.isValid(value)) return { value: null, error: `Invalid ${label} id.` };
-  return { value, error: null };
-}
-
 export const list = asyncHandler(async (req, res) => {
   const { type, status, page, limit, search } = req.query;
   const query = {};
@@ -241,11 +234,6 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: inventory.error });
   }
 
-  const appointmentRef = parseOptionalEntryObjectId(body.appointmentId, "appointment");
-  if (appointmentRef.error) {
-    return res.status(400).json({ message: appointmentRef.error });
-  }
-
   let customerName = String(body.customerName || "").trim();
   let customerPhone = String(body.customerPhone || "").trim();
   let customerEmail = String(body.customerEmail || "").trim();
@@ -323,7 +311,6 @@ export const create = asyncHandler(async (req, res) => {
     productServiceType,
     productServicePrice,
     productServiceOptionId,
-    appointmentId: appointmentRef.value,
     inventoryUsage: inventory.usage,
     inventoryCost: inventory.inventoryCost,
     ...amounts,
@@ -389,12 +376,6 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: inventory.error });
   }
 
-  const appointmentRef = bodyHas(req.body, "appointmentId")
-    ? parseOptionalEntryObjectId(req.body.appointmentId, "appointment")
-    : { value: existing.appointmentId || null, error: null };
-  if (appointmentRef.error) {
-    return res.status(400).json({ message: appointmentRef.error });
-  }
   const status = req.body.status !== undefined ? toStatus(req.body.status) : existing.status;
   if (!status) {
     return res.status(400).json({ message: "Status must be Pending, Completed, or Paid." });
@@ -556,7 +537,6 @@ export const update = asyncHandler(async (req, res) => {
   existing.productServiceType = productServiceType;
   existing.productServicePrice = productServicePrice;
   existing.productServiceOptionId = productServiceOptionId;
-  existing.appointmentId = appointmentRef.value;
   existing.inventoryUsage = inventory.usage;
   existing.inventoryCost = inventory.inventoryCost;
   existing.status = status || "Pending";

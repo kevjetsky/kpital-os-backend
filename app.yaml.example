@@ -13,5 +13,8 @@ env_variables:
   COOKIE_SAME_SITE: "none"
   MONGODB_URI: "mongodb+srv://USER:PASSWORD@cluster.mongodb.net/?appName=your-app"
   JWT_SECRET: "your-jwt-secret-here"
+  # Shared secret for the recurring-entries cron. Must match CRON_SECRET set on
+  # the Cloudflare MCP worker (wrangler secret put CRON_SECRET).
+  CRON_SECRET: "your-cron-secret-here"
   RESEND_API_KEY: "re_your_api_key_here"
   RESEND_FROM_EMAIL: "Your App <noreply@yourdomain.com>"
