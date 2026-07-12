@@ -16,6 +16,7 @@ export const createEntrySchema = z.object({
   productServiceOptionId: z.string().nullable().optional(),
   customerName: z.string().optional().default(""),
   customerPhone: z.string().optional().default(""),
+  customerInstagram: z.string().optional().default(""),
   customerEmail: z.string().optional().default(""),
   customerAddress: z.string().optional().default(""),
   customerReference: z.string().optional().default(""),

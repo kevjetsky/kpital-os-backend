@@ -7,9 +7,12 @@ import {
   roundMoney,
   normalizeOptionName,
   normalizeAddressField,
+  normalizeInstagramHandle,
   formatCustomerAddress,
   toProductServiceType,
-  serializeReferenceOption
+  serializeReferenceOption,
+  deriveCustomerName,
+  findCustomerByContact
 } from "../utils.js";
 import { REFERENCE_OPTION_KINDS } from "../constants.js";
 
@@ -38,18 +41,17 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Kind must be customer or product_service." });
   }
 
-  const name = String(req.body?.name || "").trim();
-  if (!name) {
+  let name = String(req.body?.name || "").trim();
+  if (!name && kind !== "customer") {
     return res.status(400).json({ message: "Name is required." });
   }
-
-  const normalizedName = normalizeOptionName(name);
 
   const payload = {
     kind,
     name,
-    normalizedName,
+    normalizedName: "",
     phone: "",
+    instagram: "",
     email: "",
     address: "",
     addressLine1: "",
@@ -65,6 +67,18 @@ export const create = asyncHandler(async (req, res) => {
 
   if (kind === "customer") {
     const phone = String(req.body?.phone || "").trim();
+    const instagram = normalizeInstagramHandle(req.body?.instagram);
+    if (!phone && !instagram) {
+      return res.status(400).json({ message: "A phone number or Instagram username is required." });
+    }
+
+    const duplicate = await findCustomerByContact(phone, instagram);
+    if (duplicate) {
+      return res.status(409).json({
+        message: `A customer with this phone or Instagram already exists ("${duplicate.name}").`
+      });
+    }
+
     const email = String(req.body?.email || "").trim();
     const reference = String(req.body?.reference || "").trim();
     const addressLine1 = normalizeAddressField(req.body?.addressLine1);
@@ -76,7 +90,10 @@ export const create = asyncHandler(async (req, res) => {
     const legacyAddress = String(req.body?.address || "").trim();
 
     const notes = String(req.body?.notes || "").trim();
+    name = deriveCustomerName(name, phone, instagram);
+    payload.name = name;
     payload.phone = phone;
+    payload.instagram = instagram;
     payload.email = email;
     payload.address = formattedAddress || legacyAddress;
     payload.addressLine1 = addressLine1;
@@ -108,6 +125,8 @@ export const create = asyncHandler(async (req, res) => {
     payload.cost = parsedCost.value;
   }
 
+  payload.normalizedName = normalizeOptionName(payload.name);
+
   try {
     const created = await ReferenceOption.create(payload);
     return res.status(201).json(serializeReferenceOption(created));
@@ -131,15 +150,31 @@ export const update = asyncHandler(async (req, res) => {
   }
 
   const hasOwn = (field) => Object.prototype.hasOwnProperty.call(req.body || {}, field);
-  const name = hasOwn("name") ? String(req.body?.name || "").trim() : existing.name;
-  if (!name) {
+  let name = hasOwn("name") ? String(req.body?.name || "").trim() : existing.name;
+  if (!name && existing.kind !== "customer") {
     return res.status(400).json({ message: "Name is required." });
   }
 
-  existing.name = name;
-  existing.normalizedName = normalizeOptionName(name);
-
   if (existing.kind === "customer") {
+    const phone = hasOwn("phone") ? String(req.body?.phone || "").trim() : (existing.phone || "");
+    const instagram = hasOwn("instagram")
+      ? normalizeInstagramHandle(req.body?.instagram)
+      : normalizeInstagramHandle(existing.instagram);
+    if (!phone && !instagram) {
+      return res.status(400).json({ message: "A phone number or Instagram username is required." });
+    }
+
+    const duplicate = await findCustomerByContact(phone, instagram, existing._id);
+    if (duplicate) {
+      return res.status(409).json({
+        message: `A customer with this phone or Instagram already exists ("${duplicate.name}").`
+      });
+    }
+
+    existing.phone = phone;
+    existing.instagram = instagram;
+    name = deriveCustomerName(name, phone, instagram);
+
     const addressLine1 = hasOwn("addressLine1")
       ? normalizeAddressField(req.body?.addressLine1)
       : (existing.addressLine1 || "");
@@ -154,7 +189,6 @@ export const update = asyncHandler(async (req, res) => {
     const legacyAddress = hasOwn("address") ? String(req.body?.address || "").trim() : (existing.address || "");
     const formattedAddress = formatCustomerAddress({ addressLine1, addressLine2, city, state, postalCode });
 
-    existing.phone = hasOwn("phone") ? String(req.body?.phone || "").trim() : (existing.phone || "");
     existing.email = hasOwn("email") ? String(req.body?.email || "").trim() : (existing.email || "");
     existing.reference = hasOwn("reference") ? String(req.body?.reference || "").trim() : (existing.reference || "");
     existing.notes = hasOwn("notes") ? String(req.body?.notes || "").trim() : (existing.notes || "");
@@ -165,6 +199,9 @@ export const update = asyncHandler(async (req, res) => {
     existing.postalCode = postalCode;
     existing.address = formattedAddress || legacyAddress;
   }
+
+  existing.name = name;
+  existing.normalizedName = normalizeOptionName(name);
 
   if (existing.kind === "product_service") {
     const nextType = hasOwn("optionType")

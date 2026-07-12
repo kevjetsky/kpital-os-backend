@@ -10,6 +10,8 @@ const referenceOptionSchema = new mongoose.Schema(
     name: { type: String, required: true, trim: true },
     normalizedName: { type: String, required: true, trim: true },
     phone: { type: String, default: "", trim: true },
+    // Instagram handle stored without the leading @ (customer only).
+    instagram: { type: String, default: "", trim: true },
     email: { type: String, default: "", trim: true },
     address: { type: String, default: "", trim: true },
     addressLine1: { type: String, default: "", trim: true },

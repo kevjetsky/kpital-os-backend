@@ -5,7 +5,8 @@ import {
   parseMoneyInput,
   toStatus,
   toProductServiceType,
-  resolveReferenceOption
+  resolveReferenceOption,
+  normalizeInstagramHandle
 } from "../utils.js";
 import {
   advanceDate,
@@ -103,6 +104,7 @@ export const create = asyncHandler(async (req, res) => {
   // point at a saved customer / product-service.
   let customerName = String(body.customerName || "").trim();
   let customerPhone = String(body.customerPhone || "").trim();
+  let customerInstagram = normalizeInstagramHandle(body.customerInstagram);
   let customerEmail = String(body.customerEmail || "").trim();
   let customerAddress = String(body.customerAddress || "").trim();
   let customerReference = String(body.customerReference || "").trim();
@@ -113,6 +115,7 @@ export const create = asyncHandler(async (req, res) => {
   if (customerRefOption.option) {
     customerName = customerRefOption.option.name;
     customerPhone = customerRefOption.option.phone || "";
+    customerInstagram = normalizeInstagramHandle(customerRefOption.option.instagram);
     customerEmail = customerRefOption.option.email || "";
     customerAddress = customerRefOption.option.address || "";
     customerReference = customerRefOption.option.reference || "";
@@ -151,6 +154,7 @@ export const create = asyncHandler(async (req, res) => {
     notes,
     customerName,
     customerPhone,
+    customerInstagram,
     customerEmail,
     customerAddress,
     customerReference,
@@ -282,6 +286,7 @@ export const update = asyncHandler(async (req, res) => {
       existing.customerOptionId = ref.optionId;
       existing.customerName = ref.option.name;
       existing.customerPhone = ref.option.phone || "";
+      existing.customerInstagram = normalizeInstagramHandle(ref.option.instagram);
       existing.customerEmail = ref.option.email || "";
       existing.customerAddress = ref.option.address || "";
       existing.customerReference = ref.option.reference || "";
@@ -291,6 +296,7 @@ export const update = asyncHandler(async (req, res) => {
   }
   if (bodyHas(body, "customerName")) existing.customerName = String(body.customerName || "").trim();
   if (bodyHas(body, "customerPhone")) existing.customerPhone = String(body.customerPhone || "").trim();
+  if (bodyHas(body, "customerInstagram")) existing.customerInstagram = normalizeInstagramHandle(body.customerInstagram);
   if (bodyHas(body, "customerEmail")) existing.customerEmail = String(body.customerEmail || "").trim();
   if (bodyHas(body, "customerAddress")) existing.customerAddress = String(body.customerAddress || "").trim();
   if (bodyHas(body, "customerReference")) existing.customerReference = String(body.customerReference || "").trim();

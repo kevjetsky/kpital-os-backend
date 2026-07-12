@@ -7,6 +7,7 @@ import {
   TAX_EXEMPT_ENTRY_TYPES,
   PRODUCT_SERVICE_TYPES,
   ENTRY_STATUSES,
+  PAYMENT_METHODS,
   AUTH_COOKIE_NAME,
   COOKIE_MAX_AGE_MS
 } from "./constants.js";
@@ -72,6 +73,63 @@ export function normalizeAddressField(value) {
   return String(value || "").trim();
 }
 
+// Digits-only key used to match phone numbers regardless of formatting.
+// A leading US country code is dropped so "+1 (555) 123-4567" matches "5551234567".
+export function normalizePhoneKey(value) {
+  const digits = String(value || "").replace(/\D+/g, "");
+  if (digits.length === 11 && digits.startsWith("1")) {
+    return digits.slice(1);
+  }
+  return digits;
+}
+
+// Canonical Instagram handle: lowercase, no leading @, profile URLs unwrapped.
+export function normalizeInstagramHandle(value) {
+  let handle = String(value || "").trim().toLowerCase();
+  handle = handle.replace(/^(https?:\/\/)?(www\.)?instagram\.com\//, "");
+  handle = handle.replace(/^@+/, "");
+  handle = handle.split(/[/?#\s]/)[0];
+  return handle;
+}
+
+export function toPaymentMethod(value) {
+  const key = String(value || "").trim().toLowerCase().replace(/[\s_-]+/g, "");
+  if (!key) return "";
+  return PAYMENT_METHODS.find((method) => method.toLowerCase().replace(/\s+/g, "") === key) || "";
+}
+
+// Customers are identified by phone or Instagram; the name is only a label.
+// When no name is given, fall back to whichever identifier exists.
+export function deriveCustomerName(name, phone, instagram) {
+  const trimmedName = String(name || "").trim();
+  if (trimmedName) return trimmedName;
+  const trimmedPhone = String(phone || "").trim();
+  if (trimmedPhone) return trimmedPhone;
+  const handle = normalizeInstagramHandle(instagram);
+  return handle ? `@${handle}` : "";
+}
+
+// Finds an existing customer whose phone or Instagram matches the given
+// contact info. Matching is done in memory with normalized keys so legacy
+// records with formatted phone numbers still match.
+export async function findCustomerByContact(phone, instagram, excludeId = null) {
+  const phoneKey = normalizePhoneKey(phone);
+  const instagramKey = normalizeInstagramHandle(instagram);
+  if (!phoneKey && !instagramKey) return null;
+
+  const customers = await ReferenceOption.find({ kind: "customer" }).lean();
+  return (
+    customers.find((customer) => {
+      if (excludeId && String(customer._id) === String(excludeId)) return false;
+      const candidatePhone = normalizePhoneKey(customer.phone);
+      const candidateInstagram = normalizeInstagramHandle(customer.instagram);
+      if (phoneKey && candidatePhone && candidatePhone === phoneKey) return true;
+      if (instagramKey && candidateInstagram && candidateInstagram === instagramKey) return true;
+      return false;
+    }) || null
+  );
+}
+
 export function formatCustomerAddress(parts) {
   const line1 = normalizeAddressField(parts.addressLine1);
   const line2 = normalizeAddressField(parts.addressLine2);
@@ -129,6 +187,7 @@ export function serializeReferenceOption(option) {
       _id: String(option._id),
       name: option.name,
       phone: option.phone || "",
+      instagram: option.instagram || "",
       email: option.email || "",
       address: formattedAddress || option.address || "",
       addressLine1,

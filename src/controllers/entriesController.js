@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import { Entry } from "../models/Entry.js";
 import { InventoryItem } from "../models/InventoryItem.js";
 import { InventoryTransaction } from "../models/InventoryTransaction.js";
+import { ReferenceOption } from "../models/ReferenceOption.js";
 import {
   asyncHandler,
   parseMoneyInput,
@@ -10,18 +11,73 @@ import {
   roundMoney,
   toStatus,
   toProductServiceType,
-  resolveReferenceOption
+  toPaymentMethod,
+  resolveReferenceOption,
+  normalizeInstagramHandle,
+  normalizeOptionName,
+  deriveCustomerName,
+  findCustomerByContact
 } from "../utils.js";
 import {
   ENTRY_TYPES,
   ENTRY_STATUSES,
   EXPENSE_CATEGORIES,
+  PAYMENT_METHODS,
+  CUSTOMER_REQUIRED_ENTRY_TYPES,
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE
 } from "../constants.js";
 
 function serializeUsageKey(itemId) {
   return String(itemId || "").trim();
+}
+
+// Every phone number or Instagram handle that lands on a record becomes a
+// customer: link to an existing match, otherwise create one automatically.
+// Returns the (lean) customer document the record should link to.
+async function linkOrCreateCustomer({ name, phone, instagram, email, address, reference }) {
+  const match = await findCustomerByContact(phone, instagram);
+  if (match) {
+    // Fill in contact info the customer was missing, but never overwrite.
+    const fills = {};
+    if (phone && !match.phone) fills.phone = phone;
+    if (instagram && !match.instagram) fills.instagram = instagram;
+    if (email && !match.email) fills.email = email;
+    if (Object.keys(fills).length > 0) {
+      await ReferenceOption.updateOne({ _id: match._id }, { $set: fills });
+    }
+    return { ...match, ...fills };
+  }
+
+  const baseName = deriveCustomerName(name, phone, instagram);
+  const payload = {
+    kind: "customer",
+    name: baseName,
+    normalizedName: normalizeOptionName(baseName),
+    phone: phone || "",
+    instagram: instagram || "",
+    email: email || "",
+    address: address || "",
+    reference: reference || ""
+  };
+
+  try {
+    const created = await ReferenceOption.create(payload);
+    return created.toObject();
+  } catch (error) {
+    if (error?.code === 11000) {
+      // The typed name collides with a different customer; disambiguate it
+      // with the contact info so the record can still be saved.
+      const fallbackName = `${baseName} (${phone || `@${instagram}`})`;
+      const created = await ReferenceOption.create({
+        ...payload,
+        name: fallbackName,
+        normalizedName: normalizeOptionName(fallbackName)
+      });
+      return created.toObject();
+    }
+    throw error;
+  }
 }
 
 function bodyHas(body, key) {
@@ -154,6 +210,7 @@ export const list = asyncHandler(async (req, res) => {
       { notes: searchRegex },
       { customerName: searchRegex },
       { customerPhone: searchRegex },
+      { customerInstagram: searchRegex },
       { customerEmail: searchRegex },
       { customerReference: searchRegex },
       { productServiceName: searchRegex },
@@ -236,10 +293,20 @@ export const create = asyncHandler(async (req, res) => {
 
   let customerName = String(body.customerName || "").trim();
   let customerPhone = String(body.customerPhone || "").trim();
+  let customerInstagram = normalizeInstagramHandle(body.customerInstagram);
   let customerEmail = String(body.customerEmail || "").trim();
   let customerAddress = String(body.customerAddress || "").trim();
   let customerReferenceLabel = String(body.customerReference || "").trim();
   let customerOptionId = null;
+
+  const rawPaymentMethod = String(body.paymentMethod || "").trim();
+  const paymentMethod = toPaymentMethod(rawPaymentMethod);
+  if (rawPaymentMethod && !paymentMethod) {
+    return res.status(400).json({ message: `Payment method must be one of: ${PAYMENT_METHODS.join(", ")}.` });
+  }
+  if (status === "Paid" && !paymentMethod) {
+    return res.status(400).json({ message: "A payment method is required to mark a record as Paid." });
+  }
 
   let productServiceName = String(body.productServiceName || "").trim();
   let productServiceType = toProductServiceType(body.productServiceType);
@@ -255,12 +322,45 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: customerRefOption.error });
   }
   if (customerRefOption.option) {
-    customerName = customerRefOption.option.name;
-    customerPhone = customerRefOption.option.phone || "";
-    customerEmail = customerRefOption.option.email || "";
-    customerAddress = customerRefOption.option.address || "";
-    customerReferenceLabel = customerRefOption.option.reference || "";
+    const option = customerRefOption.option;
     customerOptionId = customerRefOption.optionId;
+    // Typed values win over the stored snapshot; the option fills the blanks.
+    customerName = customerName || option.name;
+    customerPhone = customerPhone || option.phone || "";
+    customerInstagram = customerInstagram || normalizeInstagramHandle(option.instagram);
+    customerEmail = customerEmail || option.email || "";
+    customerAddress = customerAddress || option.address || "";
+    customerReferenceLabel = customerReferenceLabel || option.reference || "";
+
+    // Backfill contact info the selected customer was missing.
+    const fills = {};
+    if (customerPhone && !option.phone) fills.phone = customerPhone;
+    if (customerInstagram && !option.instagram) fills.instagram = customerInstagram;
+    if (Object.keys(fills).length > 0) {
+      await ReferenceOption.updateOne({ _id: option._id }, { $set: fills });
+    }
+  } else if (customerPhone || customerInstagram) {
+    const customer = await linkOrCreateCustomer({
+      name: customerName,
+      phone: customerPhone,
+      instagram: customerInstagram,
+      email: customerEmail,
+      address: customerAddress,
+      reference: customerReferenceLabel
+    });
+    customerOptionId = String(customer._id);
+    customerName = customerName || customer.name;
+    customerPhone = customerPhone || customer.phone || "";
+    customerInstagram = customerInstagram || normalizeInstagramHandle(customer.instagram);
+    customerEmail = customerEmail || customer.email || "";
+    customerAddress = customerAddress || customer.address || "";
+    customerReferenceLabel = customerReferenceLabel || customer.reference || "";
+  }
+
+  if (CUSTOMER_REQUIRED_ENTRY_TYPES.includes(type) && !customerPhone && !customerInstagram) {
+    return res.status(400).json({
+      message: `A customer phone number or Instagram username is required for ${type} records.`
+    });
   }
 
   const productServiceReference = await resolveReferenceOption("product_service", body.productServiceOptionId);
@@ -274,8 +374,7 @@ export const create = asyncHandler(async (req, res) => {
     productServiceOptionId = productServiceReference.optionId;
   }
 
-  if (!customerName) {
-    customerPhone = "";
+  if (!customerName && !customerPhone && !customerInstagram) {
     customerEmail = "";
     customerAddress = "";
     customerReferenceLabel = "";
@@ -303,10 +402,12 @@ export const create = asyncHandler(async (req, res) => {
     description,
     customerName,
     customerPhone,
+    customerInstagram,
     customerEmail,
     customerAddress,
     customerReference: customerReferenceLabel,
     customerOptionId,
+    paymentMethod,
     productServiceName,
     productServiceType,
     productServicePrice,
@@ -384,12 +485,28 @@ export const update = asyncHandler(async (req, res) => {
   const rawCategory = req.body.category !== undefined ? String(req.body.category || "").trim() : (existing.category || "");
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
 
+  let paymentMethod = toPaymentMethod(existing.paymentMethod) || "";
+  if (bodyHas(req.body, "paymentMethod")) {
+    const rawPaymentMethod = String(req.body.paymentMethod || "").trim();
+    const parsedMethod = toPaymentMethod(rawPaymentMethod);
+    if (rawPaymentMethod && !parsedMethod) {
+      return res.status(400).json({ message: `Payment method must be one of: ${PAYMENT_METHODS.join(", ")}.` });
+    }
+    paymentMethod = parsedMethod;
+  }
+  if (status === "Paid" && !paymentMethod && (existing.payments || []).length === 0) {
+    return res.status(400).json({ message: "A payment method is required to mark a record as Paid." });
+  }
+
   let customerName = existing.customerName || "";
   let customerPhone = existing.customerPhone || "";
+  let customerInstagram = normalizeInstagramHandle(existing.customerInstagram);
   let customerEmail = existing.customerEmail || "";
   let customerAddress = existing.customerAddress || "";
   let customerReferenceLabel = existing.customerReference || "";
   let customerOptionId = existing.customerOptionId ? String(existing.customerOptionId) : null;
+  const customerFieldsTouched = ["customerOptionId", "customerName", "customerPhone", "customerInstagram", "customerEmail"]
+    .some((field) => bodyHas(req.body, field));
 
   let productServiceName = existing.productServiceName || "";
   let productServiceType = toProductServiceType(existing.productServiceType);
@@ -405,6 +522,10 @@ export const update = asyncHandler(async (req, res) => {
 
   if (bodyHas(req.body, "customerPhone")) {
     customerPhone = String(req.body.customerPhone || "").trim();
+  }
+
+  if (bodyHas(req.body, "customerInstagram")) {
+    customerInstagram = normalizeInstagramHandle(req.body.customerInstagram);
   }
 
   if (bodyHas(req.body, "customerEmail")) {
@@ -452,6 +573,9 @@ export const update = asyncHandler(async (req, res) => {
       if (!bodyHas(req.body, "customerPhone")) {
         customerPhone = "";
       }
+      if (!bodyHas(req.body, "customerInstagram")) {
+        customerInstagram = "";
+      }
       if (!bodyHas(req.body, "customerEmail")) {
         customerEmail = "";
       }
@@ -462,13 +586,59 @@ export const update = asyncHandler(async (req, res) => {
         customerReferenceLabel = "";
       }
     } else {
+      const option = customerRefOption.option;
       customerOptionId = customerRefOption.optionId;
-      customerName = customerRefOption.option.name;
-      customerPhone = customerRefOption.option.phone || "";
-      customerEmail = customerRefOption.option.email || "";
-      customerAddress = customerRefOption.option.address || "";
-      customerReferenceLabel = customerRefOption.option.reference || "";
+      // Typed values win over the stored snapshot; the option fills the blanks.
+      customerName = (bodyHas(req.body, "customerName") && customerName) ? customerName : option.name;
+      customerPhone = (bodyHas(req.body, "customerPhone") && customerPhone) ? customerPhone : (option.phone || "");
+      customerInstagram = (bodyHas(req.body, "customerInstagram") && customerInstagram)
+        ? customerInstagram
+        : normalizeInstagramHandle(option.instagram);
+      customerEmail = (bodyHas(req.body, "customerEmail") && customerEmail) ? customerEmail : (option.email || "");
+      customerAddress = (bodyHas(req.body, "customerAddress") && customerAddress) ? customerAddress : (option.address || "");
+      customerReferenceLabel = (bodyHas(req.body, "customerReference") && customerReferenceLabel)
+        ? customerReferenceLabel
+        : (option.reference || "");
+
+      // Backfill contact info the selected customer was missing.
+      const fills = {};
+      if (customerPhone && !option.phone) fills.phone = customerPhone;
+      if (customerInstagram && !option.instagram) fills.instagram = customerInstagram;
+      if (Object.keys(fills).length > 0) {
+        await ReferenceOption.updateOne({ _id: option._id }, { $set: fills });
+      }
     }
+  }
+
+  if (!customerOptionId && (customerPhone || customerInstagram)) {
+    const customer = await linkOrCreateCustomer({
+      name: customerName,
+      phone: customerPhone,
+      instagram: customerInstagram,
+      email: customerEmail,
+      address: customerAddress,
+      reference: customerReferenceLabel
+    });
+    customerOptionId = String(customer._id);
+    customerName = customerName || customer.name;
+    customerPhone = customerPhone || customer.phone || "";
+    customerInstagram = customerInstagram || normalizeInstagramHandle(customer.instagram);
+    customerEmail = customerEmail || customer.email || "";
+    customerAddress = customerAddress || customer.address || "";
+    customerReferenceLabel = customerReferenceLabel || customer.reference || "";
+  }
+
+  // Only enforce the customer requirement when this update actually touches
+  // customer data, so status/amount tweaks on legacy records keep working.
+  if (
+    customerFieldsTouched &&
+    CUSTOMER_REQUIRED_ENTRY_TYPES.includes(type) &&
+    !customerPhone &&
+    !customerInstagram
+  ) {
+    return res.status(400).json({
+      message: `A customer phone number or Instagram username is required for ${type} records.`
+    });
   }
 
   if (bodyHas(req.body, "productServiceOptionId")) {
@@ -496,8 +666,7 @@ export const update = asyncHandler(async (req, res) => {
     }
   }
 
-  if (!customerName) {
-    customerPhone = "";
+  if (!customerName && !customerPhone && !customerInstagram) {
     customerEmail = "";
     customerAddress = "";
     customerReferenceLabel = "";
@@ -529,6 +698,7 @@ export const update = asyncHandler(async (req, res) => {
   existing.netProfit = amounts.netProfit;
   existing.customerName = customerName;
   existing.customerPhone = customerPhone;
+  existing.customerInstagram = customerInstagram;
   existing.customerEmail = customerEmail;
   existing.customerAddress = customerAddress;
   existing.customerReference = customerReferenceLabel;
@@ -540,6 +710,7 @@ export const update = asyncHandler(async (req, res) => {
   existing.inventoryUsage = inventory.usage;
   existing.inventoryCost = inventory.inventoryCost;
   existing.status = status || "Pending";
+  existing.paymentMethod = paymentMethod;
   existing.notes = notes;
   existing.category = category;
 
@@ -584,10 +755,16 @@ export const addPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid payment date." });
   }
 
-  const method = String(req.body?.method || "").trim();
+  const method = toPaymentMethod(req.body?.method);
+  if (!method) {
+    return res.status(400).json({ message: `A payment method is required (${PAYMENT_METHODS.join(", ")}).` });
+  }
   const note = String(req.body?.note || "").trim();
 
   entry.payments.push({ amount: parsedAmount.value, date, method, note, createdAt: new Date() });
+  if (!entry.paymentMethod) {
+    entry.paymentMethod = method;
+  }
   await entry.save();
   return res.json(entry);
 });

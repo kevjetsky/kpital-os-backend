@@ -110,7 +110,8 @@ describe("GET /api/entries", () => {
         date: "2026-05-12",
         description: "HDMI port repair",
         income: 120,
-        customerName: "Avery Console"
+        customerName: "Avery Console",
+        customerPhone: "555-010-1111"
       });
     await request(app)
       .post("/api/entries")
@@ -120,7 +121,8 @@ describe("GET /api/entries", () => {
         date: "2026-05-12",
         description: "Controller sale",
         income: 45,
-        customerName: "Morgan Retail"
+        customerName: "Morgan Retail",
+        customerInstagram: "@morgan.retail"
       });
 
     const res = await request(app)

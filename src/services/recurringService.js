@@ -59,6 +59,7 @@ function buildEntryPayload(recurring, occurrenceDate) {
     description: recurring.description || "",
     customerName: recurring.customerName || "",
     customerPhone: recurring.customerPhone || "",
+    customerInstagram: recurring.customerInstagram || "",
     customerEmail: recurring.customerEmail || "",
     customerAddress: recurring.customerAddress || "",
     customerReference: recurring.customerReference || "",

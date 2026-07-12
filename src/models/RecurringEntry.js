@@ -19,6 +19,7 @@ const recurringEntrySchema = new mongoose.Schema(
     notes: { type: String, default: "", trim: true },
     customerName: { type: String, default: "", trim: true },
     customerPhone: { type: String, default: "", trim: true },
+    customerInstagram: { type: String, default: "", trim: true },
     customerEmail: { type: String, default: "", trim: true },
     customerAddress: { type: String, default: "", trim: true },
     customerReference: { type: String, default: "", trim: true },

@@ -15,6 +15,7 @@ const entrySchema = new mongoose.Schema(
     netProfit: { type: Number, required: true, default: 0 },
     customerName: { type: String, default: "", trim: true },
     customerPhone: { type: String, default: "", trim: true },
+    customerInstagram: { type: String, default: "", trim: true },
     customerEmail: { type: String, default: "", trim: true },
     customerAddress: { type: String, default: "", trim: true },
     customerReference: { type: String, default: "", trim: true },
@@ -40,6 +41,8 @@ const entrySchema = new mongoose.Schema(
     inventoryCost: { type: Number, required: true, default: 0 },
     notes: { type: String, default: "", trim: true },
     category: { type: String, default: "", trim: true },
+    // How this record was (or will be) paid. Must be set once the record is Paid.
+    paymentMethod: { type: String, default: "", trim: true },
     payments: [
       {
         amount: { type: Number, required: true },

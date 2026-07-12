@@ -3,6 +3,10 @@ export const ENTRY_TYPES = ["Repair", "Sales", "Expenses", "Tip"];
 export const TAX_EXEMPT_ENTRY_TYPES = ["Tip"];
 export const EXPENSE_CATEGORIES = ["Rent", "Parts", "Marketing", "Utilities", "Payroll", "Other"];
 export const ENTRY_STATUSES = ["Pending", "Completed", "Paid"];
+export const PAYMENT_METHODS = ["Cash", "Card", "Zelle", "Cash App", "Chime", "PayPal", "Venmo", "Apple Pay", "Other"];
+// Entry types that represent customer-facing work and therefore require a
+// reachable customer (phone or Instagram) on every record.
+export const CUSTOMER_REQUIRED_ENTRY_TYPES = ["Repair", "Sales"];
 export const REFERENCE_OPTION_KINDS = ["customer", "product_service"];
 export const PRODUCT_SERVICE_TYPES = ["product", "service"];
 export const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || "kpital_token";
