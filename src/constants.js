@@ -1,7 +1,11 @@
 export const SALES_TAX_RATE = 0.0825;
 export const ENTRY_TYPES = ["Repair", "Sales", "Expenses", "Tip"];
 export const TAX_EXEMPT_ENTRY_TYPES = ["Tip"];
-export const EXPENSE_CATEGORIES = ["Rent", "Parts", "Marketing", "Utilities", "Payroll", "Other"];
+// "Parts" was removed: parts are inventory and hit the books as COGS at the
+// moment they're consumed on a repair/sale (see inventory usage), so a separate
+// Parts expense line would double-count. "Tools & Equipment" covers gear that is
+// simply an expense the day it's bought (screwdrivers, heat gun, etc.).
+export const EXPENSE_CATEGORIES = ["Rent", "Tools & Equipment", "Marketing", "Utilities", "Payroll", "Other"];
 export const ENTRY_STATUSES = ["Pending", "Completed", "Paid"];
 export const PAYMENT_METHODS = ["Cash", "Card", "Zelle", "Cash App", "Chime", "PayPal", "Venmo", "Apple Pay", "Other"];
 // Entry types that represent customer-facing work and therefore require a

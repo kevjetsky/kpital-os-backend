@@ -9,6 +9,9 @@ import recurringRouter from "./routes/recurring.js";
 import referenceOptionsRouter from "./routes/referenceOptions.js";
 import inventoryRouter from "./routes/inventory.js";
 import backupRouter from "./routes/backup.js";
+import taxRouter from "./routes/tax.js";
+import pushRouter from "./routes/push.js";
+import notificationsRouter from "./routes/notifications.js";
 
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
 
@@ -68,6 +71,9 @@ app.use("/api/recurring", recurringRouter);
 app.use("/api/reference-options", referenceOptionsRouter);
 app.use("/api/inventory", inventoryRouter);
 app.use("/api/backup", backupRouter);
+app.use("/api/tax", taxRouter);
+app.use("/api/push", pushRouter);
+app.use("/api/notifications", notificationsRouter);
 
 if (process.env.SENTRY_DSN) {
   const Sentry = await import("@sentry/node");

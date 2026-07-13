@@ -6,8 +6,10 @@ import {
   toStatus,
   toProductServiceType,
   resolveReferenceOption,
-  normalizeInstagramHandle
+  normalizeInstagramHandle,
+  getMainSettings
 } from "../utils.js";
+import { sendToAll } from "../services/notificationService.js";
 import {
   advanceDate,
   startOfUtcDay,
@@ -359,5 +361,24 @@ export const runOne = asyncHandler(async (req, res) => {
 // Cron-triggered: post everything due across all templates.
 export const runDue = asyncHandler(async (_req, res) => {
   const summary = await postAllDue();
+
+  // Notify the owner when the daily cron auto-posts recurring entries (rent,
+  // payroll, subscriptions, etc.), unless they've turned that notification off.
+  if (summary.totalPosted > 0) {
+    const settings = await getMainSettings();
+    if (settings?.notificationPrefs?.recurringPosted !== false) {
+      const names = summary.details.map((d) => d.name).join(", ");
+      await sendToAll({
+        title: "Recurring entries posted",
+        body:
+          summary.totalPosted === 1
+            ? `Auto-posted: ${names}.`
+            : `Auto-posted ${summary.totalPosted} entries: ${names}.`,
+        url: "/",
+        tag: "recurring-posted"
+      });
+    }
+  }
+
   return res.json({ ok: true, ...summary });
 });
