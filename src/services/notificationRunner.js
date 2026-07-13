@@ -1,5 +1,6 @@
 import { Entry } from "../models/Entry.js";
 import { InventoryItem } from "../models/InventoryItem.js";
+import { PushSubscription } from "../models/PushSubscription.js";
 import { getMainSettings, roundMoney } from "../utils.js";
 import { sendToAll } from "./notificationService.js";
 import { getQuarterOwed, periodLabel, quarterOfDate } from "./taxService.js";
@@ -117,6 +118,14 @@ export async function runNotifications(now = new Date()) {
   const settings = await getMainSettings();
   if (!settings) {
     return { skipped: "no-settings" };
+  }
+
+  // No devices subscribed yet: skip entirely so dedupe markers (low-stock
+  // flags, quarterly/weekly timestamps) aren't consumed by runs nobody hears.
+  // The first cron after a device subscribes will deliver everything due.
+  const subscribers = await PushSubscription.countDocuments();
+  if (subscribers === 0) {
+    return { skipped: "no-subscribers" };
   }
 
   const prefs = settings.notificationPrefs || {};
