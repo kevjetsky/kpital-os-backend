@@ -41,6 +41,12 @@ const entrySchema = new mongoose.Schema(
     inventoryCost: { type: Number, required: true, default: 0 },
     notes: { type: String, default: "", trim: true },
     category: { type: String, default: "", trim: true },
+    // Warranty callback: this record is rework on a previous job. callbackOf
+    // points at the original entry so failure rates and time-to-failure can be
+    // computed; it may be null for callbacks whose original job predates the app.
+    isWarrantyCallback: { type: Boolean, default: false },
+    callbackOf: { type: mongoose.Schema.Types.ObjectId, ref: "Entry", default: null },
+    callbackReason: { type: String, default: "", trim: true },
     // How this record was (or will be) paid. Must be set once the record is Paid.
     paymentMethod: { type: String, default: "", trim: true },
     payments: [
@@ -64,5 +70,7 @@ const entrySchema = new mongoose.Schema(
 
 entrySchema.index({ date: -1, createdAt: -1 });
 entrySchema.index({ type: 1, status: 1, date: -1 });
+entrySchema.index({ customerOptionId: 1, type: 1, date: -1 });
+entrySchema.index({ isWarrantyCallback: 1, date: -1 });
 
 export const Entry = mongoose.model("Entry", entrySchema);

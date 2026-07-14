@@ -12,6 +12,8 @@ export const PAYMENT_METHODS = ["Cash", "Card", "Zelle", "Cash App", "Chime", "P
 // reachable customer (phone or Instagram) on every record.
 export const CUSTOMER_REQUIRED_ENTRY_TYPES = ["Repair", "Sales"];
 export const REFERENCE_OPTION_KINDS = ["customer", "product_service"];
+// How long after a repair a returning customer counts as a warranty callback.
+export const WARRANTY_DAYS = 40;
 export const PRODUCT_SERVICE_TYPES = ["product", "service"];
 export const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || "kpital_token";
 export const COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;

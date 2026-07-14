@@ -25,7 +25,8 @@ import {
   PAYMENT_METHODS,
   CUSTOMER_REQUIRED_ENTRY_TYPES,
   DEFAULT_PAGE_SIZE,
-  MAX_PAGE_SIZE
+  MAX_PAGE_SIZE,
+  WARRANTY_DAYS
 } from "../constants.js";
 
 function serializeUsageKey(itemId) {
@@ -82,6 +83,48 @@ async function linkOrCreateCustomer({ name, phone, instagram, email, address, re
 
 function bodyHas(body, key) {
   return Object.prototype.hasOwnProperty.call(body || {}, key);
+}
+
+// Validates the warranty-callback fields on create/update. Returns
+// { isWarrantyCallback, callbackOf, callbackReason, error }.
+async function resolveCallbackFields(body, { selfId = null, existing = null } = {}) {
+  let isWarrantyCallback = existing ? !!existing.isWarrantyCallback : false;
+  let callbackOf = existing?.callbackOf ? String(existing.callbackOf) : null;
+  let callbackReason = existing?.callbackReason || "";
+
+  if (bodyHas(body, "callbackReason")) {
+    callbackReason = String(body.callbackReason || "").trim();
+  }
+  if (bodyHas(body, "isWarrantyCallback")) {
+    isWarrantyCallback = Boolean(body.isWarrantyCallback);
+  }
+  if (bodyHas(body, "callbackOf")) {
+    const raw = body.callbackOf === null ? "" : String(body.callbackOf || "").trim();
+    if (!raw) {
+      callbackOf = null;
+    } else {
+      if (!mongoose.Types.ObjectId.isValid(raw)) {
+        return { error: "Invalid callbackOf entry id." };
+      }
+      if (selfId && raw === String(selfId)) {
+        return { error: "An entry cannot be a callback of itself." };
+      }
+      const original = await Entry.findById(raw).lean();
+      if (!original) {
+        return { error: "Original entry for callbackOf not found." };
+      }
+      callbackOf = raw;
+      // Linking to an original job implies this record is a callback.
+      isWarrantyCallback = true;
+    }
+  }
+
+  if (!isWarrantyCallback) {
+    callbackOf = null;
+    callbackReason = "";
+  }
+
+  return { isWarrantyCallback, callbackOf, callbackReason, error: null };
 }
 
 async function normalizeInventoryUsage(input) {
@@ -182,8 +225,17 @@ async function assertInventoryUsageAvailable(previousUsage, nextUsage) {
 }
 
 export const list = asyncHandler(async (req, res) => {
-  const { type, status, page, limit, search } = req.query;
+  const { type, status, page, limit, search, callbacks } = req.query;
   const query = {};
+
+  if (callbacks !== undefined) {
+    const flag = String(callbacks).toLowerCase();
+    if (flag === "true" || flag === "1") {
+      query.isWarrantyCallback = true;
+    } else if (flag === "false" || flag === "0") {
+      query.isWarrantyCallback = { $ne: true };
+    }
+  }
 
   if (type) {
     const typeFilter = String(type);
@@ -252,6 +304,171 @@ export const list = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/entries/warranty-candidates
+// Given a customer (customerOptionId, or phone/instagram to match), returns
+// their recent Repair entries inside the warranty window — the jobs a new
+// visit could be a callback on.
+export const warrantyCandidates = asyncHandler(async (req, res) => {
+  const { customerOptionId, phone, instagram, date, windowDays, excludeId } = req.query;
+
+  const parsedWindow = windowDays !== undefined ? Number(windowDays) : WARRANTY_DAYS;
+  if (!Number.isFinite(parsedWindow) || parsedWindow <= 0 || parsedWindow > 365) {
+    return res.status(400).json({ message: "windowDays must be a number between 1 and 365." });
+  }
+
+  const referenceDate = date ? new Date(String(date)) : new Date();
+  if (Number.isNaN(referenceDate.getTime())) {
+    return res.status(400).json({ message: "Invalid date." });
+  }
+
+  let optionId = String(customerOptionId || "").trim();
+  if (optionId && !mongoose.Types.ObjectId.isValid(optionId)) {
+    return res.status(400).json({ message: "Invalid customerOptionId." });
+  }
+  if (!optionId) {
+    const cleanPhone = String(phone || "").trim();
+    const cleanInstagram = normalizeInstagramHandle(instagram);
+    if (!cleanPhone && !cleanInstagram) {
+      return res.status(400).json({ message: "Provide customerOptionId, phone, or instagram." });
+    }
+    const match = await findCustomerByContact(cleanPhone, cleanInstagram);
+    if (!match) {
+      return res.json({ windowDays: parsedWindow, customerOptionId: null, candidates: [] });
+    }
+    optionId = String(match._id);
+  }
+
+  const windowStart = new Date(referenceDate.getTime() - parsedWindow * 24 * 60 * 60 * 1000);
+  const query = {
+    customerOptionId: optionId,
+    type: "Repair",
+    date: { $gte: windowStart, $lte: referenceDate }
+  };
+  const cleanExcludeId = String(excludeId || "").trim();
+  if (cleanExcludeId && mongoose.Types.ObjectId.isValid(cleanExcludeId)) {
+    query._id = { $ne: cleanExcludeId };
+  }
+
+  const candidates = await Entry.find(query)
+    .sort({ date: -1 })
+    .select("date description productServiceName income status isWarrantyCallback callbackOf customerName")
+    .lean();
+
+  return res.json({ windowDays: parsedWindow, customerOptionId: optionId, candidates });
+});
+
+// GET /api/entries/callback-stats
+// Meters warranty callbacks over a date range: rate, cost eaten, time to
+// failure, and which repair types generate them.
+export const callbackStats = asyncHandler(async (req, res) => {
+  const { from, to } = req.query;
+
+  const now = new Date();
+  const toDate = to ? new Date(String(to)) : now;
+  const fromDate = from
+    ? new Date(String(from))
+    : new Date(toDate.getFullYear(), toDate.getMonth() - 11, 1); // default: last 12 months
+  if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+    return res.status(400).json({ message: "Invalid from/to date." });
+  }
+  if (fromDate > toDate) {
+    return res.status(400).json({ message: "'from' must be before 'to'." });
+  }
+
+  const rangeQuery = { date: { $gte: fromDate, $lte: toDate } };
+  const [callbacks, totalRepairs, repairsByTypeAgg] = await Promise.all([
+    Entry.find({ ...rangeQuery, isWarrantyCallback: true }).lean(),
+    Entry.countDocuments({ ...rangeQuery, type: "Repair", isWarrantyCallback: { $ne: true } }),
+    Entry.aggregate([
+      { $match: { ...rangeQuery, type: "Repair", isWarrantyCallback: { $ne: true } } },
+      { $group: { _id: { $ifNull: ["$productServiceName", ""] }, repairs: { $sum: 1 } } }
+    ])
+  ]);
+
+  const originalIds = callbacks
+    .map((cb) => cb.callbackOf)
+    .filter((id) => id)
+    .map((id) => String(id));
+  const originals = originalIds.length
+    ? await Entry.find({ _id: { $in: originalIds } })
+        .select("date productServiceName productServiceOptionId inventoryUsage")
+        .lean()
+    : [];
+  const originalsById = new Map(originals.map((entry) => [String(entry._id), entry]));
+
+  let partsCost = 0;
+  let totalExpense = 0;
+  const daysToCallback = [];
+  const byType = new Map();
+
+  for (const cb of callbacks) {
+    partsCost = roundMoney(partsCost + (cb.inventoryCost || 0));
+    totalExpense = roundMoney(totalExpense + (cb.expense || 0));
+
+    const original = cb.callbackOf ? originalsById.get(String(cb.callbackOf)) : null;
+    // Group by the original job's repair type when linked; otherwise fall back
+    // to the callback's own service name.
+    const typeName = (original?.productServiceName || cb.productServiceName || "(unspecified)").trim() || "(unspecified)";
+    byType.set(typeName, (byType.get(typeName) || 0) + 1);
+
+    if (original?.date && cb.date) {
+      const days = Math.round((new Date(cb.date) - new Date(original.date)) / (24 * 60 * 60 * 1000));
+      if (Number.isFinite(days) && days >= 0) daysToCallback.push(days);
+    }
+  }
+
+  daysToCallback.sort((a, b) => a - b);
+  const medianDays = daysToCallback.length
+    ? daysToCallback[Math.floor((daysToCallback.length - 1) / 2)]
+    : null;
+  const avgDays = daysToCallback.length
+    ? Math.round(daysToCallback.reduce((sum, d) => sum + d, 0) / daysToCallback.length)
+    : null;
+
+  const repairsByType = new Map(
+    repairsByTypeAgg.map((row) => [(row._id || "(unspecified)").trim() || "(unspecified)", row.repairs])
+  );
+  const byRepairType = Array.from(byType.entries())
+    .map(([name, count]) => {
+      const repairs = repairsByType.get(name) || 0;
+      return {
+        name,
+        callbacks: count,
+        repairs,
+        rate: repairs > 0 ? Number((count / repairs).toFixed(4)) : null
+      };
+    })
+    .sort((a, b) => b.callbacks - a.callbacks);
+
+  return res.json({
+    from: fromDate,
+    to: toDate,
+    warrantyDays: WARRANTY_DAYS,
+    totalRepairs,
+    callbackCount: callbacks.length,
+    callbackRate: totalRepairs > 0 ? Number((callbacks.length / totalRepairs).toFixed(4)) : null,
+    callbackPartsCost: partsCost,
+    callbackTotalExpense: totalExpense,
+    medianDaysToCallback: medianDays,
+    avgDaysToCallback: avgDays,
+    byRepairType,
+    recentCallbacks: callbacks
+      .sort((a, b) => new Date(b.date) - new Date(a.date))
+      .slice(0, 20)
+      .map((cb) => ({
+        _id: cb._id,
+        date: cb.date,
+        customerName: cb.customerName,
+        description: cb.description,
+        productServiceName: cb.productServiceName,
+        callbackOf: cb.callbackOf,
+        callbackReason: cb.callbackReason,
+        inventoryCost: cb.inventoryCost,
+        expense: cb.expense
+      }))
+  });
+});
+
 export const create = asyncHandler(async (req, res) => {
   const body = req.body ?? {};
   const type = String(body.type || "");
@@ -274,6 +491,11 @@ export const create = asyncHandler(async (req, res) => {
   const notes = String(body.notes || "").trim();
   const rawCategory = String(body.category || "").trim();
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
+
+  const callback = await resolveCallbackFields(body);
+  if (callback.error) {
+    return res.status(400).json({ message: callback.error });
+  }
 
   const parsedIncome = parseMoneyInput(body.income ?? 0, "Income");
   if (parsedIncome.error) {
@@ -417,6 +639,9 @@ export const create = asyncHandler(async (req, res) => {
     ...amounts,
     notes,
     category,
+    isWarrantyCallback: callback.isWarrantyCallback,
+    callbackOf: callback.callbackOf,
+    callbackReason: callback.callbackReason,
     status
   });
   await reconcileInventoryUsage([], inventory.usage, `Used on record ${entry._id}`);
@@ -484,6 +709,11 @@ export const update = asyncHandler(async (req, res) => {
   const notes = req.body.notes !== undefined ? String(req.body.notes).trim() : existing.notes;
   const rawCategory = req.body.category !== undefined ? String(req.body.category || "").trim() : (existing.category || "");
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
+
+  const callback = await resolveCallbackFields(req.body, { selfId: entryId, existing });
+  if (callback.error) {
+    return res.status(400).json({ message: callback.error });
+  }
 
   let paymentMethod = toPaymentMethod(existing.paymentMethod) || "";
   if (bodyHas(req.body, "paymentMethod")) {
@@ -713,6 +943,9 @@ export const update = asyncHandler(async (req, res) => {
   existing.paymentMethod = paymentMethod;
   existing.notes = notes;
   existing.category = category;
+  existing.isWarrantyCallback = callback.isWarrantyCallback;
+  existing.callbackOf = callback.callbackOf;
+  existing.callbackReason = callback.callbackReason;
 
   await existing.save();
   await reconcileInventoryUsage(previousUsage, inventory.usage, `Updated record ${existing._id}`);

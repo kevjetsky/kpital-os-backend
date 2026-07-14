@@ -5,6 +5,8 @@ import * as entries from "../controllers/entriesController.js";
 const router = Router();
 
 router.get("/", requireAuth, entries.list);
+router.get("/warranty-candidates", requireAuth, entries.warrantyCandidates);
+router.get("/callback-stats", requireAuth, entries.callbackStats);
 router.post("/", requireAuth, entries.create);
 router.put("/:id", requireAuth, entries.update);
 router.delete("/:id", requireAuth, entries.remove);
