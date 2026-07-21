@@ -18,3 +18,8 @@ env_variables:
   CRON_SECRET: "your-cron-secret-here"
   RESEND_API_KEY: "re_your_api_key_here"
   RESEND_FROM_EMAIL: "Your App <noreply@yourdomain.com>"
+  # Secret required to create an additional business account via
+  # POST /api/auth/signup. Leave this unset to keep account creation disabled:
+  # the route 403s rather than falling open, so a missing value can never
+  # silently expose public registration.
+  SIGNUP_INVITE_CODE: "generate-a-long-random-string"
