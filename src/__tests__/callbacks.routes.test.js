@@ -2,16 +2,20 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
 import mongoose from "mongoose";
 import { MongoMemoryServer } from "mongodb-memory-server";
+import bcrypt from "bcryptjs";
 import app from "../app.js";
+import { Settings } from "../models/Settings.js";
 
 let mongod;
 let token;
+let passwordHash;
 
 beforeAll(async () => {
   mongod = await MongoMemoryServer.create();
   process.env.JWT_SECRET = "test-secret-for-tests-only";
   process.env.MONGODB_URI = mongod.getUri();
   await mongoose.connect(mongod.getUri());
+  passwordHash = await bcrypt.hash("password123", 10);
 });
 
 afterAll(async () => {
@@ -21,8 +25,15 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await mongoose.connection.dropDatabase();
-  await request(app).post("/api/auth/setup").send({ password: "password123" });
-  const login = await request(app).post("/api/auth/login").send({ password: "password123" });
+  await Settings.create({
+    key: "main",
+    email: "owner@example.com",
+    emailVerified: true,
+    passwordHash
+  });
+  const login = await request(app)
+    .post("/api/auth/login")
+    .send({ email: "owner@example.com", password: "password123" });
   token = login.body.token;
 });
 
