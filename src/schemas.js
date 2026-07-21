@@ -12,6 +12,14 @@ export const setupSchema = z.object({
   password: z.string().min(4, "Password must be at least 4 characters.")
 });
 
+// New accounts get a stronger minimum than the legacy 4-character setup rule:
+// this is a public-facing route and the data behind it is financial.
+export const signupSchema = z.object({
+  email: emailField,
+  password: z.string().min(8, "Password must be at least 8 characters."),
+  inviteCode: z.string().min(1, "An invite code is required.")
+});
+
 export const verifyEmailSchema = z.object({
   email: emailField,
   code: z.string().trim().regex(/^\d{6}$/, "Code must be 6 digits.")

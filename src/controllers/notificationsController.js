@@ -1,4 +1,4 @@
-import { asyncHandler, getMainSettings } from "../utils.js";
+import { asyncHandler, getAccountById } from "../utils.js";
 import { runNotifications } from "../services/notificationRunner.js";
 
 const PREF_KEYS = ["lowStock", "quarterlyTax", "recurringPosted", "weeklySummary"];
@@ -11,8 +11,8 @@ export const runDue = asyncHandler(async (_req, res) => {
 });
 
 // GET /api/notifications/prefs
-export const getPrefs = asyncHandler(async (_req, res) => {
-  const settings = await getMainSettings();
+export const getPrefs = asyncHandler(async (req, res) => {
+  const settings = await getAccountById(req.accountId);
   const prefs = settings?.notificationPrefs || {};
   return res.json({
     lowStock: prefs.lowStock !== false,
@@ -24,7 +24,7 @@ export const getPrefs = asyncHandler(async (_req, res) => {
 
 // PUT /api/notifications/prefs — toggle which notifications the owner wants.
 export const updatePrefs = asyncHandler(async (req, res) => {
-  const settings = await getMainSettings();
+  const settings = await getAccountById(req.accountId);
   if (!settings) {
     return res.status(404).json({ message: "Settings not initialized." });
   }

@@ -4,6 +4,7 @@ import { validate } from "../middleware/validate.js";
 import {
   loginSchema,
   setupSchema,
+  signupSchema,
   verifyEmailSchema,
   resendCodeSchema,
   forgotPasswordSchema,
@@ -15,6 +16,7 @@ const router = Router();
 
 router.get("/status", auth.status);
 router.post("/setup", authRateLimiter, validate(setupSchema), auth.setup);
+router.post("/signup", authRateLimiter, validate(signupSchema), auth.signup);
 router.post("/login", authRateLimiter, validate(loginSchema), auth.login);
 router.post("/verify-email", authRateLimiter, validate(verifyEmailSchema), auth.verifyEmail);
 router.post("/resend-code", authRateLimiter, validate(resendCodeSchema), auth.resendCode);

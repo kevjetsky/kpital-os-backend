@@ -276,8 +276,34 @@ export function setAuthCookie(res, token) {
   });
 }
 
+// Login email, normalized. Addresses are matched case-insensitively so
+// "Kevin@x.com" and "kevin@x.com" cannot become two separate accounts.
+export function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+// Resolves the account a login attempt refers to. This replaced the
+// single-account getMainSettings() lookup: with multiple businesses, the email
+// is the only thing that identifies which account is being authenticated.
+export async function findAccountByEmail(email) {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return null;
+  return Settings.findOne({ email: normalized });
+}
+
+export async function getAccountById(accountId) {
+  if (!accountId) return null;
+  return Settings.findById(accountId);
+}
+
+// The bootstrap account from before multi-tenancy. Only the setup/status paths
+// still need it, to decide whether this deployment has been initialised at all.
 export async function getMainSettings() {
   return Settings.findOne({ key: "main" });
+}
+
+export async function countAccounts() {
+  return Settings.countDocuments({});
 }
 
 export function asyncHandler(handler) {

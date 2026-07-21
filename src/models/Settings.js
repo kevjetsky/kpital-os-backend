@@ -2,7 +2,10 @@ import mongoose from "mongoose";
 
 const settingsSchema = new mongoose.Schema(
   {
-    key: { type: String, required: true, unique: true },
+    // Legacy discriminator from the single-account era. No longer unique: each
+    // account is its own Settings document and is identified by email. Kept so
+    // the original document (key: "main") still validates.
+    key: { type: String, default: "" },
     passwordHash: { type: String, required: true },
     // Owner login email. Empty on legacy documents created before email auth;
     // those are upgraded through the setup flow.
@@ -28,6 +31,14 @@ const settingsSchema = new mongoose.Schema(
     }
   },
   { timestamps: true }
+);
+
+// Email is the account identifier and must be unique — but only among accounts
+// that actually have one. The partial filter lets legacy/in-progress documents
+// with an empty email coexist instead of colliding on "".
+settingsSchema.index(
+  { email: 1 },
+  { unique: true, partialFilterExpression: { email: { $gt: "" } } }
 );
 
 export const Settings = mongoose.model("Settings", settingsSchema);
