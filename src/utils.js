@@ -196,7 +196,12 @@ export function serializeReferenceOption(option) {
       state,
       postalCode,
       reference: option.reference || "",
-      notes: option.notes || ""
+      notes: option.notes || "",
+      // Surfaced so detail screens can show audit timestamps. Mongoose sets
+      // these via `timestamps: true`; documents created before that may lack
+      // them, hence the null fallback.
+      createdAt: option.createdAt || null,
+      updatedAt: option.updatedAt || null
     };
   }
 
@@ -205,7 +210,9 @@ export function serializeReferenceOption(option) {
     name: option.name,
     optionType: toProductServiceType(option.optionType),
     price: roundMoney(option.price || 0),
-    cost: roundMoney(option.cost || 0)
+    cost: roundMoney(option.cost || 0),
+    createdAt: option.createdAt || null,
+    updatedAt: option.updatedAt || null
   };
 }
 
