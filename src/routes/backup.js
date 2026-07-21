@@ -9,13 +9,13 @@ import { InventoryTransaction } from "../models/InventoryTransaction.js";
 const router = Router();
 
 // Full data export, excluding auth settings (password hash never leaves the server).
-router.get("/", requireAuth, asyncHandler(async (_req, res) => {
+router.get("/", requireAuth, asyncHandler(async (req, res) => {
   const [entries, referenceOptions, inventoryItems, inventoryTransactions] =
     await Promise.all([
-      Entry.find().sort({ date: 1 }).lean(),
-      ReferenceOption.find().lean(),
-      InventoryItem.find().lean(),
-      InventoryTransaction.find().sort({ createdAt: 1 }).lean()
+      Entry.find({ accountId: req.accountId }).sort({ date: 1 }).lean(),
+      ReferenceOption.find({ accountId: req.accountId }).lean(),
+      InventoryItem.find({ accountId: req.accountId }).lean(),
+      InventoryTransaction.find({ accountId: req.accountId }).sort({ createdAt: 1 }).lean()
     ]);
 
   res.json({

@@ -18,9 +18,13 @@ export const subscribe = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "A valid push subscription is required." });
   }
 
+  // Scoped on endpoint + accountId so re-subscribing the same browser under a
+  // different account re-points it rather than silently updating another
+  // account's row.
   await PushSubscription.findOneAndUpdate(
-    { endpoint },
+    { endpoint, accountId: req.accountId },
     {
+      accountId: req.accountId,
       endpoint,
       keys: { p256dh, auth },
       userAgent: String(body.userAgent || req.get("user-agent") || "").slice(0, 300)
@@ -38,6 +42,6 @@ export const unsubscribe = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "endpoint is required." });
   }
 
-  await PushSubscription.deleteOne({ endpoint });
+  await PushSubscription.deleteOne({ endpoint, accountId: req.accountId });
   return res.json({ ok: true });
 });

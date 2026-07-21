@@ -1,9 +1,13 @@
 import mongoose from "mongoose";
+import { tenantGuard } from "./tenantGuard.js";
 
 // A recurring entry is a saved template plus a schedule. On its due date a real
 // Entry is materialized from the template (see services/recurringService.js).
 const recurringEntrySchema = new mongoose.Schema(
   {
+    // Owning account (the Settings _id). Every query must be scoped by this;
+    // without it one business would read another's data.
+    accountId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
     name: { type: String, required: true, trim: true },
 
     // ── Entry template ──────────────────────────────────────────────────────
@@ -63,6 +67,11 @@ const recurringEntrySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// The cron sweep queries due templates across ALL accounts, so this index stays
+// unscoped by design — see recurringController.runDue.
 recurringEntrySchema.index({ active: 1, nextRunDate: 1 });
+recurringEntrySchema.index({ accountId: 1, active: 1, nextRunDate: 1 });
+
+tenantGuard(recurringEntrySchema, { modelName: "RecurringEntry" });
 
 export const RecurringEntry = mongoose.model("RecurringEntry", recurringEntrySchema);

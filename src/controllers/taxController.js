@@ -8,7 +8,7 @@ import { getLiability, periodLabel } from "../services/taxService.js";
 export const liability = asyncHandler(async (req, res) => {
   const now = new Date();
   const year = Number.parseInt(String(req.query.year ?? ""), 10) || now.getUTCFullYear();
-  const data = await getLiability(year);
+  const data = await getLiability(req.accountId, year);
   return res.json(data);
 });
 
@@ -37,6 +37,7 @@ export const createRemittance = asyncHandler(async (req, res) => {
   }
 
   const created = await TaxRemittance.create({
+    accountId: req.accountId,
     period: periodLabel(year, quarter),
     year,
     quarter,
@@ -63,7 +64,9 @@ export const deleteRemittance = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid remittance id." });
   }
 
-  const deleted = await TaxRemittance.findByIdAndDelete(id);
+  // Scoped delete: findByIdAndDelete alone would let one account delete
+  // another's remittance by guessing an id.
+  const deleted = await TaxRemittance.findOneAndDelete({ _id: id, accountId: req.accountId });
   if (!deleted) {
     return res.status(404).json({ message: "Remittance not found." });
   }

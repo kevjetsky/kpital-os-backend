@@ -26,8 +26,22 @@ export function getBearerToken(req) {
   return token || null;
 }
 
-export function issueAuthToken() {
-  return jwt.sign({ role: "owner" }, process.env.JWT_SECRET, {
+// req.accountId is a string (it comes out of the JWT). find()/updateOne() cast
+// it against the schema automatically, but aggregate() does NOT — a raw string
+// in a $match silently matches nothing. Always wrap it for aggregation stages.
+export function toAccountObjectId(accountId) {
+  if (!accountId) throw new Error("An accountId is required.");
+  return accountId instanceof mongoose.Types.ObjectId
+    ? accountId
+    : new mongoose.Types.ObjectId(String(accountId));
+}
+
+// The token carries the account it belongs to; requireAuth turns that into
+// req.accountId, which every query scopes on. Tokens issued before tenancy have
+// no accountId and are rejected, forcing a re-login.
+export function issueAuthToken(accountId) {
+  if (!accountId) throw new Error("issueAuthToken requires an accountId.");
+  return jwt.sign({ role: "owner", accountId: String(accountId) }, process.env.JWT_SECRET, {
     expiresIn: "7d"
   });
 }
@@ -112,12 +126,12 @@ export function deriveCustomerName(name, phone, instagram) {
 // Finds an existing customer whose phone or Instagram matches the given
 // contact info. Matching is done in memory with normalized keys so legacy
 // records with formatted phone numbers still match.
-export async function findCustomerByContact(phone, instagram, excludeId = null) {
+export async function findCustomerByContact(accountId, phone, instagram, excludeId = null) {
   const phoneKey = normalizePhoneKey(phone);
   const instagramKey = normalizeInstagramHandle(instagram);
   if (!phoneKey && !instagramKey) return null;
 
-  const customers = await ReferenceOption.find({ kind: "customer" }).lean();
+  const customers = await ReferenceOption.find({ accountId, kind: "customer" }).lean();
   return (
     customers.find((customer) => {
       if (excludeId && String(customer._id) === String(excludeId)) return false;
@@ -216,7 +230,7 @@ export function serializeReferenceOption(option) {
   };
 }
 
-export async function resolveReferenceOption(kind, rawOptionId) {
+export async function resolveReferenceOption(accountId, kind, rawOptionId) {
   const parsed = parseOptionalObjectId(rawOptionId);
   if (parsed === undefined) {
     return { optionId: undefined, option: undefined, error: null };
@@ -230,7 +244,7 @@ export async function resolveReferenceOption(kind, rawOptionId) {
     return { optionId: null, option: null, error: null };
   }
 
-  const option = await ReferenceOption.findOne({ _id: parsed, kind }).lean();
+  const option = await ReferenceOption.findOne({ _id: parsed, accountId, kind }).lean();
   if (!option) {
     return { optionId: null, option: null, error: "Reference option not found." };
   }

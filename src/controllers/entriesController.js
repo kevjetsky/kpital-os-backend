@@ -16,7 +16,8 @@ import {
   normalizeInstagramHandle,
   normalizeOptionName,
   deriveCustomerName,
-  findCustomerByContact
+  findCustomerByContact,
+  toAccountObjectId
 } from "../utils.js";
 import {
   ENTRY_TYPES,
@@ -36,8 +37,8 @@ function serializeUsageKey(itemId) {
 // Every phone number or Instagram handle that lands on a record becomes a
 // customer: link to an existing match, otherwise create one automatically.
 // Returns the (lean) customer document the record should link to.
-async function linkOrCreateCustomer({ name, phone, instagram, email, address, reference }) {
-  const match = await findCustomerByContact(phone, instagram);
+async function linkOrCreateCustomer(accountId, { name, phone, instagram, email, address, reference }) {
+  const match = await findCustomerByContact(accountId, phone, instagram);
   if (match) {
     // Fill in contact info the customer was missing, but never overwrite.
     const fills = {};
@@ -45,13 +46,14 @@ async function linkOrCreateCustomer({ name, phone, instagram, email, address, re
     if (instagram && !match.instagram) fills.instagram = instagram;
     if (email && !match.email) fills.email = email;
     if (Object.keys(fills).length > 0) {
-      await ReferenceOption.updateOne({ _id: match._id }, { $set: fills });
+      await ReferenceOption.updateOne({ _id: match._id, accountId }, { $set: fills });
     }
     return { ...match, ...fills };
   }
 
   const baseName = deriveCustomerName(name, phone, instagram);
   const payload = {
+    accountId,
     kind: "customer",
     name: baseName,
     normalizedName: normalizeOptionName(baseName),
@@ -87,7 +89,7 @@ function bodyHas(body, key) {
 
 // Validates the warranty-callback fields on create/update. Returns
 // { isWarrantyCallback, callbackOf, callbackReason, error }.
-async function resolveCallbackFields(body, { selfId = null, existing = null } = {}) {
+async function resolveCallbackFields(accountId, body, { selfId = null, existing = null } = {}) {
   let isWarrantyCallback = existing ? !!existing.isWarrantyCallback : false;
   let callbackOf = existing?.callbackOf ? String(existing.callbackOf) : null;
   let callbackReason = existing?.callbackReason || "";
@@ -109,7 +111,7 @@ async function resolveCallbackFields(body, { selfId = null, existing = null } = 
       if (selfId && raw === String(selfId)) {
         return { error: "An entry cannot be a callback of itself." };
       }
-      const original = await Entry.findById(raw).lean();
+      const original = await Entry.findOne({ _id: raw, accountId }).lean();
       if (!original) {
         return { error: "Original entry for callbackOf not found." };
       }
@@ -127,7 +129,7 @@ async function resolveCallbackFields(body, { selfId = null, existing = null } = 
   return { isWarrantyCallback, callbackOf, callbackReason, error: null };
 }
 
-async function normalizeInventoryUsage(input) {
+async function normalizeInventoryUsage(accountId, input) {
   if (!Array.isArray(input)) return { usage: [], inventoryCost: 0, error: null };
 
   const aggregated = new Map();
@@ -145,7 +147,7 @@ async function normalizeInventoryUsage(input) {
 
   if (aggregated.size === 0) return { usage: [], inventoryCost: 0, error: null };
 
-  const items = await InventoryItem.find({ _id: { $in: Array.from(aggregated.keys()) } });
+  const items = await InventoryItem.find({ accountId, _id: { $in: Array.from(aggregated.keys()) } });
   const itemsById = new Map(items.map((item) => [String(item._id), item]));
   const usage = [];
   let inventoryCost = 0;
@@ -179,7 +181,7 @@ function usageQuantityMap(usage = []) {
   return map;
 }
 
-async function reconcileInventoryUsage(previousUsage, nextUsage, reason) {
+async function reconcileInventoryUsage(accountId, previousUsage, nextUsage, reason) {
   const previous = usageQuantityMap(previousUsage);
   const next = usageQuantityMap(nextUsage);
   const itemIds = Array.from(new Set([...previous.keys(), ...next.keys()]));
@@ -188,7 +190,7 @@ async function reconcileInventoryUsage(previousUsage, nextUsage, reason) {
     const delta = roundMoney((next.get(itemId) || 0) - (previous.get(itemId) || 0));
     if (delta === 0) continue;
 
-    const item = await InventoryItem.findById(itemId);
+    const item = await InventoryItem.findOne({ _id: itemId, accountId });
     if (!item) throw Object.assign(new Error("Inventory item not found."), { status: 400 });
     const quantityBefore = item.quantity;
     const quantityAfter = roundMoney(quantityBefore - delta);
@@ -199,6 +201,7 @@ async function reconcileInventoryUsage(previousUsage, nextUsage, reason) {
     item.quantity = quantityAfter;
     await item.save();
     await InventoryTransaction.create({
+      accountId,
       itemId: item._id,
       type: delta > 0 ? "out" : "in",
       quantity: Math.abs(delta),
@@ -209,14 +212,14 @@ async function reconcileInventoryUsage(previousUsage, nextUsage, reason) {
   }
 }
 
-async function assertInventoryUsageAvailable(previousUsage, nextUsage) {
+async function assertInventoryUsageAvailable(accountId, previousUsage, nextUsage) {
   const previous = usageQuantityMap(previousUsage);
   const next = usageQuantityMap(nextUsage);
   const itemIds = Array.from(new Set([...previous.keys(), ...next.keys()]));
   for (const itemId of itemIds) {
     const delta = roundMoney((next.get(itemId) || 0) - (previous.get(itemId) || 0));
     if (delta <= 0) continue;
-    const item = await InventoryItem.findById(itemId).lean();
+    const item = await InventoryItem.findOne({ _id: itemId, accountId }).lean();
     if (!item) throw Object.assign(new Error("Inventory item not found."), { status: 400 });
     if (roundMoney((item.quantity || 0) - delta) < 0) {
       throw Object.assign(new Error(`Not enough stock for ${item.name}.`), { status: 400 });
@@ -226,7 +229,7 @@ async function assertInventoryUsageAvailable(previousUsage, nextUsage) {
 
 export const list = asyncHandler(async (req, res) => {
   const { type, status, page, limit, search, callbacks } = req.query;
-  const query = {};
+  const query = { accountId: req.accountId };
 
   if (callbacks !== undefined) {
     const flag = String(callbacks).toLowerCase();
@@ -331,7 +334,7 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
     if (!cleanPhone && !cleanInstagram) {
       return res.status(400).json({ message: "Provide customerOptionId, phone, or instagram." });
     }
-    const match = await findCustomerByContact(cleanPhone, cleanInstagram);
+    const match = await findCustomerByContact(req.accountId, cleanPhone, cleanInstagram);
     if (!match) {
       return res.json({ windowDays: parsedWindow, customerOptionId: null, candidates: [] });
     }
@@ -340,6 +343,7 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
 
   const windowStart = new Date(referenceDate.getTime() - parsedWindow * 24 * 60 * 60 * 1000);
   const query = {
+    accountId: req.accountId,
     customerOptionId: optionId,
     type: "Repair",
     date: { $gte: windowStart, $lte: referenceDate }
@@ -375,12 +379,19 @@ export const callbackStats = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "'from' must be before 'to'." });
   }
 
-  const rangeQuery = { date: { $gte: fromDate, $lte: toDate } };
+  const rangeQuery = { accountId: req.accountId, date: { $gte: fromDate, $lte: toDate } };
   const [callbacks, totalRepairs, repairsByTypeAgg] = await Promise.all([
     Entry.find({ ...rangeQuery, isWarrantyCallback: true }).lean(),
     Entry.countDocuments({ ...rangeQuery, type: "Repair", isWarrantyCallback: { $ne: true } }),
     Entry.aggregate([
-      { $match: { ...rangeQuery, type: "Repair", isWarrantyCallback: { $ne: true } } },
+      {
+        $match: {
+          ...rangeQuery,
+          accountId: toAccountObjectId(req.accountId),
+          type: "Repair",
+          isWarrantyCallback: { $ne: true }
+        }
+      },
       { $group: { _id: { $ifNull: ["$productServiceName", ""] }, repairs: { $sum: 1 } } }
     ])
   ]);
@@ -390,7 +401,7 @@ export const callbackStats = asyncHandler(async (req, res) => {
     .filter((id) => id)
     .map((id) => String(id));
   const originals = originalIds.length
-    ? await Entry.find({ _id: { $in: originalIds } })
+    ? await Entry.find({ accountId: req.accountId, _id: { $in: originalIds } })
         .select("date productServiceName productServiceOptionId inventoryUsage")
         .lean()
     : [];
@@ -492,7 +503,7 @@ export const create = asyncHandler(async (req, res) => {
   const rawCategory = String(body.category || "").trim();
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
 
-  const callback = await resolveCallbackFields(body);
+  const callback = await resolveCallbackFields(req.accountId, body);
   if (callback.error) {
     return res.status(400).json({ message: callback.error });
   }
@@ -508,7 +519,7 @@ export const create = asyncHandler(async (req, res) => {
   const income = parsedIncome.value;
   const manualExpense = parsedExpense.value;
 
-  const inventory = await normalizeInventoryUsage(body.inventoryUsage);
+  const inventory = await normalizeInventoryUsage(req.accountId, body.inventoryUsage);
   if (inventory.error) {
     return res.status(400).json({ message: inventory.error });
   }
@@ -539,7 +550,7 @@ export const create = asyncHandler(async (req, res) => {
   let productServicePrice = parsedProductPrice.value;
   let productServiceOptionId = null;
 
-  const customerRefOption = await resolveReferenceOption("customer", body.customerOptionId);
+  const customerRefOption = await resolveReferenceOption(req.accountId, "customer", body.customerOptionId);
   if (customerRefOption.error) {
     return res.status(400).json({ message: customerRefOption.error });
   }
@@ -559,10 +570,10 @@ export const create = asyncHandler(async (req, res) => {
     if (customerPhone && !option.phone) fills.phone = customerPhone;
     if (customerInstagram && !option.instagram) fills.instagram = customerInstagram;
     if (Object.keys(fills).length > 0) {
-      await ReferenceOption.updateOne({ _id: option._id }, { $set: fills });
+      await ReferenceOption.updateOne({ _id: option._id, accountId: req.accountId }, { $set: fills });
     }
   } else if (customerPhone || customerInstagram) {
-    const customer = await linkOrCreateCustomer({
+    const customer = await linkOrCreateCustomer(req.accountId, {
       name: customerName,
       phone: customerPhone,
       instagram: customerInstagram,
@@ -585,7 +596,7 @@ export const create = asyncHandler(async (req, res) => {
     });
   }
 
-  const productServiceReference = await resolveReferenceOption("product_service", body.productServiceOptionId);
+  const productServiceReference = await resolveReferenceOption(req.accountId, "product_service", body.productServiceOptionId);
   if (productServiceReference.error) {
     return res.status(400).json({ message: productServiceReference.error });
   }
@@ -616,9 +627,10 @@ export const create = asyncHandler(async (req, res) => {
   const rawTaxRate = body.taxRate !== undefined ? Number(body.taxRate) : undefined;
   const expense = roundMoney(manualExpense + inventory.inventoryCost);
   const amounts = computeAmounts(income, expense, type, rawTaxRate);
-  await assertInventoryUsageAvailable([], inventory.usage);
+  await assertInventoryUsageAvailable(req.accountId, [], inventory.usage);
 
   const entry = await Entry.create({
+    accountId: req.accountId,
     date,
     type,
     description,
@@ -644,7 +656,7 @@ export const create = asyncHandler(async (req, res) => {
     callbackReason: callback.callbackReason,
     status
   });
-  await reconcileInventoryUsage([], inventory.usage, `Used on record ${entry._id}`);
+  await reconcileInventoryUsage(req.accountId, [], inventory.usage, `Used on record ${entry._id}`);
 
   return res.status(201).json(entry);
 });
@@ -655,7 +667,7 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid entry id." });
   }
 
-  const existing = await Entry.findById(entryId);
+  const existing = await Entry.findOne({ _id: entryId, accountId: req.accountId });
   if (!existing) {
     return res.status(404).json({ message: "Entry not found." });
   }
@@ -692,7 +704,7 @@ export const update = asyncHandler(async (req, res) => {
   const income = parsedIncome.value;
   const manualExpense = parsedExpense.value;
   const inventory = bodyHas(req.body, "inventoryUsage")
-    ? await normalizeInventoryUsage(req.body.inventoryUsage)
+    ? await normalizeInventoryUsage(req.accountId, req.body.inventoryUsage)
     : {
         usage: existing.inventoryUsage || [],
         inventoryCost: Number(existing.inventoryCost || 0),
@@ -710,7 +722,7 @@ export const update = asyncHandler(async (req, res) => {
   const rawCategory = req.body.category !== undefined ? String(req.body.category || "").trim() : (existing.category || "");
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
 
-  const callback = await resolveCallbackFields(req.body, { selfId: entryId, existing });
+  const callback = await resolveCallbackFields(req.accountId, req.body, { selfId: entryId, existing });
   if (callback.error) {
     return res.status(400).json({ message: callback.error });
   }
@@ -790,7 +802,7 @@ export const update = asyncHandler(async (req, res) => {
   }
 
   if (bodyHas(req.body, "customerOptionId")) {
-    const customerRefOption = await resolveReferenceOption("customer", req.body.customerOptionId);
+    const customerRefOption = await resolveReferenceOption(req.accountId, "customer", req.body.customerOptionId);
     if (customerRefOption.error) {
       return res.status(400).json({ message: customerRefOption.error });
     }
@@ -835,13 +847,13 @@ export const update = asyncHandler(async (req, res) => {
       if (customerPhone && !option.phone) fills.phone = customerPhone;
       if (customerInstagram && !option.instagram) fills.instagram = customerInstagram;
       if (Object.keys(fills).length > 0) {
-        await ReferenceOption.updateOne({ _id: option._id }, { $set: fills });
+        await ReferenceOption.updateOne({ _id: option._id, accountId: req.accountId }, { $set: fills });
       }
     }
   }
 
   if (!customerOptionId && (customerPhone || customerInstagram)) {
-    const customer = await linkOrCreateCustomer({
+    const customer = await linkOrCreateCustomer(req.accountId, {
       name: customerName,
       phone: customerPhone,
       instagram: customerInstagram,
@@ -872,7 +884,7 @@ export const update = asyncHandler(async (req, res) => {
   }
 
   if (bodyHas(req.body, "productServiceOptionId")) {
-    const productServiceReference = await resolveReferenceOption("product_service", req.body.productServiceOptionId);
+    const productServiceReference = await resolveReferenceOption(req.accountId, "product_service", req.body.productServiceOptionId);
     if (productServiceReference.error) {
       return res.status(400).json({ message: productServiceReference.error });
     }
@@ -917,7 +929,7 @@ export const update = asyncHandler(async (req, res) => {
   const expense = roundMoney(manualExpense + inventory.inventoryCost);
   const amounts = computeAmounts(income, expense, type, rawTaxRate);
   const previousUsage = existing.inventoryUsage ? existing.inventoryUsage.map((item) => item.toObject ? item.toObject() : item) : [];
-  await assertInventoryUsageAvailable(previousUsage, inventory.usage);
+  await assertInventoryUsageAvailable(req.accountId, previousUsage, inventory.usage);
 
   existing.date = date;
   existing.type = type;
@@ -948,7 +960,7 @@ export const update = asyncHandler(async (req, res) => {
   existing.callbackReason = callback.callbackReason;
 
   await existing.save();
-  await reconcileInventoryUsage(previousUsage, inventory.usage, `Updated record ${existing._id}`);
+  await reconcileInventoryUsage(req.accountId, previousUsage, inventory.usage, `Updated record ${existing._id}`);
   return res.json(existing);
 });
 
@@ -958,11 +970,11 @@ export const remove = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid entry id." });
   }
 
-  const deleted = await Entry.findByIdAndDelete(entryId);
+  const deleted = await Entry.findOneAndDelete({ _id: entryId, accountId: req.accountId });
   if (!deleted) {
     return res.status(404).json({ message: "Entry not found." });
   }
-  await reconcileInventoryUsage(deleted.inventoryUsage || [], [], `Deleted record ${deleted._id}`);
+  await reconcileInventoryUsage(req.accountId, deleted.inventoryUsage || [], [], `Deleted record ${deleted._id}`);
 
   return res.json({ ok: true });
 });
@@ -973,7 +985,7 @@ export const addPayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid entry id." });
   }
 
-  const entry = await Entry.findById(entryId);
+  const entry = await Entry.findOne({ _id: entryId, accountId: req.accountId });
   if (!entry) {
     return res.status(404).json({ message: "Entry not found." });
   }
@@ -1013,7 +1025,7 @@ export const deletePayment = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid payment id." });
   }
 
-  const entry = await Entry.findById(entryId);
+  const entry = await Entry.findOne({ _id: entryId, accountId: req.accountId });
   if (!entry) {
     return res.status(404).json({ message: "Entry not found." });
   }

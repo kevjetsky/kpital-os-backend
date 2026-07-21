@@ -11,3 +11,4 @@ npm-debug.log*
 *.log
 app.yaml
 .vapid-keys.txt
+backups/

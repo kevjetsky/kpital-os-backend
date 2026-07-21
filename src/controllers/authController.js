@@ -143,7 +143,7 @@ export const login = asyncHandler(async (req, res) => {
     return res.json({ ok: true, requiresVerification: true });
   }
 
-  const token = issueAuthToken();
+  const token = issueAuthToken(settings._id);
   setAuthCookie(res, token);
   return res.json({ ok: true, token });
 });
@@ -169,7 +169,7 @@ export const verifyEmail = asyncHandler(async (req, res) => {
   clearPendingCode(settings);
   await settings.save();
 
-  const token = issueAuthToken();
+  const token = issueAuthToken(settings._id);
   setAuthCookie(res, token);
   return res.json({ ok: true, token });
 });
@@ -205,7 +205,7 @@ export const resetPassword = asyncHandler(async (req, res) => {
   clearPendingCode(settings);
   await settings.save();
 
-  const token = issueAuthToken();
+  const token = issueAuthToken(settings._id);
   setAuthCookie(res, token);
   return res.json({ ok: true, token });
 });

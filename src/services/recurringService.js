@@ -54,6 +54,7 @@ function buildEntryPayload(recurring, occurrenceDate) {
   const amounts = computeAmounts(income, expense, recurring.type);
 
   return {
+    accountId: recurring.accountId,
     date: occurrenceDate,
     type: recurring.type,
     description: recurring.description || "",
@@ -139,10 +140,12 @@ export async function postDueForRecurring(recurring, asOf = todayUtc()) {
 // Post all due occurrences across every active recurring template. Returns a
 // summary used by the cron endpoint.
 export async function postAllDue(asOf = todayUtc()) {
+  // Intentionally cross-account: the nightly cron posts due templates for every
+  // business, then each posted Entry inherits its template's accountId.
   const due = await RecurringEntry.find({
     active: true,
     nextRunDate: { $lte: asOf }
-  });
+  }).setOptions({ allowCrossAccount: true });
 
   let totalPosted = 0;
   const details = [];
@@ -150,7 +153,12 @@ export async function postAllDue(asOf = todayUtc()) {
     const created = await postDueForRecurring(recurring, asOf);
     if (created.length > 0) {
       totalPosted += created.length;
-      details.push({ recurringId: String(recurring._id), name: recurring.name, posted: created.length });
+      details.push({
+        recurringId: String(recurring._id),
+        accountId: String(recurring.accountId),
+        name: recurring.name,
+        posted: created.length
+      });
     }
   }
 

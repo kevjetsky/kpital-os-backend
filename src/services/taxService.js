@@ -1,6 +1,6 @@
 import { Entry } from "../models/Entry.js";
 import { TaxRemittance } from "../models/TaxRemittance.js";
-import { roundMoney } from "../utils.js";
+import { roundMoney, toAccountObjectId } from "../utils.js";
 
 // Quarters use the entry's calendar date in UTC. Entries store date-only values
 // at UTC midnight, so UTC month/year here matches how the frontend groups the
@@ -20,12 +20,12 @@ export function quarterOfDate(date) {
 
 // Sum of sales tax collected per quarter for a year. Tips carry salesTax = 0, so
 // summing salesTax across all entry types is already tax-exempt-correct.
-async function collectedByQuarter(year) {
+async function collectedByQuarter(accountId, year) {
   const start = new Date(Date.UTC(year, 0, 1));
   const end = new Date(Date.UTC(year + 1, 0, 1));
 
   const rows = await Entry.aggregate([
-    { $match: { date: { $gte: start, $lt: end } } },
+    { $match: { accountId: toAccountObjectId(accountId), date: { $gte: start, $lt: end } } },
     {
       $group: {
         _id: { $ceil: { $divide: [{ $month: { date: "$date", timezone: "UTC" } }, 3] } },
@@ -41,9 +41,9 @@ async function collectedByQuarter(year) {
   return map;
 }
 
-async function remittedByQuarter(year) {
+async function remittedByQuarter(accountId, year) {
   const rows = await TaxRemittance.aggregate([
-    { $match: { year } },
+    { $match: { accountId: toAccountObjectId(accountId), year } },
     { $group: { _id: "$quarter", remitted: { $sum: "$amount" } } }
   ]);
 
@@ -56,11 +56,11 @@ async function remittedByQuarter(year) {
 
 // Full per-quarter liability picture for a year: collected, remitted, and the
 // balance still owed, plus the underlying remittance records.
-export async function getLiability(year) {
+export async function getLiability(accountId, year) {
   const [collected, remitted, remittances] = await Promise.all([
-    collectedByQuarter(year),
-    remittedByQuarter(year),
-    TaxRemittance.find({ year }).sort({ quarter: 1, dateFiled: 1 }).lean()
+    collectedByQuarter(accountId, year),
+    remittedByQuarter(accountId, year),
+    TaxRemittance.find({ accountId, year }).sort({ quarter: 1, dateFiled: 1 }).lean()
   ]);
 
   const quarters = [1, 2, 3, 4].map((quarter) => {
@@ -102,8 +102,11 @@ export async function getLiability(year) {
 
 // Collected minus remitted for a single quarter — used by the notification cron
 // to remind about a just-closed quarter.
-export async function getQuarterOwed(year, quarter) {
-  const [collected, remitted] = await Promise.all([collectedByQuarter(year), remittedByQuarter(year)]);
+export async function getQuarterOwed(accountId, year, quarter) {
+  const [collected, remitted] = await Promise.all([
+    collectedByQuarter(accountId, year),
+    remittedByQuarter(accountId, year)
+  ]);
   return {
     period: periodLabel(year, quarter),
     collected: collected[quarter],

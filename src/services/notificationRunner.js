@@ -1,8 +1,9 @@
 import { Entry } from "../models/Entry.js";
 import { InventoryItem } from "../models/InventoryItem.js";
 import { PushSubscription } from "../models/PushSubscription.js";
-import { getMainSettings, roundMoney } from "../utils.js";
-import { sendToAll } from "./notificationService.js";
+import { Settings } from "../models/Settings.js";
+import { roundMoney, toAccountObjectId } from "../utils.js";
+import { sendToAccount } from "./notificationService.js";
 import { getQuarterOwed, periodLabel, quarterOfDate } from "./taxService.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -15,10 +16,10 @@ function startOfUtcDay(date) {
 
 // Alert when parts newly drop to/below their low-stock threshold. Uses the
 // lowStockNotified flag so we alert on the transition, not every run.
-async function runLowStock(prefs, results) {
+async function runLowStock(accountId, prefs, results) {
   if (prefs.lowStock === false) return;
 
-  const items = await InventoryItem.find().lean();
+  const items = await InventoryItem.find({ accountId }).lean();
   const newlyLow = [];
   const recoveredIds = [];
 
@@ -33,7 +34,7 @@ async function runLowStock(prefs, results) {
 
   if (newlyLow.length > 0) {
     await InventoryItem.updateMany(
-      { _id: { $in: newlyLow.map((i) => i._id) } },
+      { accountId, _id: { $in: newlyLow.map((i) => i._id) } },
       { $set: { lowStockNotified: true } }
     );
     const names = newlyLow.map((i) => `${i.name} (${i.quantity} left)`).join(", ");
@@ -41,18 +42,21 @@ async function runLowStock(prefs, results) {
       newlyLow.length === 1
         ? `${newlyLow[0].name} is low: ${newlyLow[0].quantity} left.`
         : `${newlyLow.length} parts are low on stock: ${names}.`;
-    const push = await sendToAll({ title: "Low stock", body, url: "/?tab=inventory", tag: "low-stock" });
+    const push = await sendToAccount(accountId, { title: "Low stock", body, url: "/?tab=inventory", tag: "low-stock" });
     results.lowStock = { alerted: newlyLow.length, push };
   }
 
   if (recoveredIds.length > 0) {
-    await InventoryItem.updateMany({ _id: { $in: recoveredIds } }, { $set: { lowStockNotified: false } });
+    await InventoryItem.updateMany(
+      { accountId, _id: { $in: recoveredIds } },
+      { $set: { lowStockNotified: false } }
+    );
   }
 }
 
 // On the first run of a new quarter, remind to file the quarter that just
 // closed, showing what was collected and what is still owed.
-async function runQuarterlyTax(settings, prefs, now, results) {
+async function runQuarterlyTax(accountId, settings, prefs, now, results) {
   if (prefs.quarterlyTax === false) return;
 
   const { year, quarter } = quarterOfDate(now);
@@ -62,12 +66,12 @@ async function runQuarterlyTax(settings, prefs, now, results) {
 
   if (settings.notificationState?.lastQuarterlyTaxPeriod === period) return;
 
-  const owed = await getQuarterOwed(prevYear, prevQuarter);
+  const owed = await getQuarterOwed(accountId, prevYear, prevQuarter);
   if (owed.collected > 0) {
     const body = `${period}: you collected ${money(owed.collected)} in sales tax${
       owed.owed > 0 ? `, ${money(owed.owed)} still to remit` : " (fully remitted)"
     }. Time to file.`;
-    const push = await sendToAll({ title: "Sales tax due", body, url: "/?tab=tax", tag: "quarterly-tax" });
+    const push = await sendToAccount(accountId, { title: "Sales tax due", body, url: "/?tab=tax", tag: "quarterly-tax" });
     results.quarterlyTax = { period, ...owed, push };
   }
 
@@ -77,7 +81,7 @@ async function runQuarterlyTax(settings, prefs, now, results) {
 }
 
 // Monday digest of the previous 7 days.
-async function runWeeklySummary(settings, prefs, now, results) {
+async function runWeeklySummary(accountId, settings, prefs, now, results) {
   if (prefs.weeklySummary === false) return;
   if (now.getUTCDay() !== 1) return; // Mondays only
 
@@ -88,7 +92,7 @@ async function runWeeklySummary(settings, prefs, now, results) {
   const start = new Date(end.getTime() - 7 * DAY_MS);
 
   const [agg] = await Entry.aggregate([
-    { $match: { date: { $gte: start, $lt: end } } },
+    { $match: { accountId: toAccountObjectId(accountId), date: { $gte: start, $lt: end } } },
     {
       $group: {
         _id: null,
@@ -104,7 +108,7 @@ async function runWeeklySummary(settings, prefs, now, results) {
   const expense = roundMoney(agg?.expense || 0);
   const netProfit = roundMoney(agg?.netProfit || 0);
   const body = `Last 7 days: ${money(income)} in, ${money(expense)} out, net ${money(netProfit)} (${agg?.count || 0} entries).`;
-  const push = await sendToAll({ title: "Weekly summary", body, url: "/", tag: "weekly-summary" });
+  const push = await sendToAccount(accountId, { title: "Weekly summary", body, url: "/", tag: "weekly-summary" });
   results.weeklySummary = { income, expense, netProfit, count: agg?.count || 0, push };
 
   settings.notificationState = settings.notificationState || {};
@@ -115,25 +119,35 @@ async function runWeeklySummary(settings, prefs, now, results) {
 // Entry point for the daily notifications cron. Evaluates every trigger and
 // returns a summary of what fired.
 export async function runNotifications(now = new Date()) {
-  const settings = await getMainSettings();
-  if (!settings) {
+  // One pass per account. Each account's triggers, dedupe markers and devices
+  // are independent, so a quiet account never suppresses a noisy one.
+  const accounts = await Settings.find({}).select("_id notificationPrefs notificationState");
+  if (accounts.length === 0) {
     return { skipped: "no-settings" };
   }
 
-  // No devices subscribed yet: skip entirely so dedupe markers (low-stock
-  // flags, quarterly/weekly timestamps) aren't consumed by runs nobody hears.
-  // The first cron after a device subscribes will deliver everything due.
-  const subscribers = await PushSubscription.countDocuments();
-  if (subscribers === 0) {
-    return { skipped: "no-subscribers" };
+  const byAccount = {};
+  for (const settings of accounts) {
+    const accountId = settings._id;
+
+    // No devices subscribed yet: skip entirely so dedupe markers (low-stock
+    // flags, quarterly/weekly timestamps) aren't consumed by runs nobody hears.
+    // The first cron after a device subscribes will deliver everything due.
+    const subscribers = await PushSubscription.countDocuments({ accountId });
+    if (subscribers === 0) {
+      byAccount[String(accountId)] = { skipped: "no-subscribers" };
+      continue;
+    }
+
+    const prefs = settings.notificationPrefs || {};
+    const results = {};
+
+    await runLowStock(accountId, prefs, results);
+    await runQuarterlyTax(accountId, settings, prefs, now, results);
+    await runWeeklySummary(accountId, settings, prefs, now, results);
+
+    byAccount[String(accountId)] = results;
   }
 
-  const prefs = settings.notificationPrefs || {};
-  const results = {};
-
-  await runLowStock(prefs, results);
-  await runQuarterlyTax(settings, prefs, now, results);
-  await runWeeklySummary(settings, prefs, now, results);
-
-  return results;
+  return { accounts: byAccount };
 }

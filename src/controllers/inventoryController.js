@@ -5,7 +5,7 @@ import { asyncHandler, roundMoney } from "../utils.js";
 
 export const listItems = asyncHandler(async (req, res) => {
   const { category, lowStock } = req.query;
-  const query = {};
+  const query = { accountId: req.accountId };
 
   if (category) {
     query.category = String(category).trim();
@@ -25,7 +25,7 @@ export const getItem = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid item id." });
   }
 
-  const item = await InventoryItem.findById(id).lean();
+  const item = await InventoryItem.findOne({ _id: id, accountId: req.accountId }).lean();
   if (!item) {
     return res.status(404).json({ message: "Item not found." });
   }
@@ -46,7 +46,7 @@ export const createItem = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "SKU is required." });
   }
 
-  const existing = await InventoryItem.findOne({ sku });
+  const existing = await InventoryItem.findOne({ sku, accountId: req.accountId });
   if (existing) {
     return res.status(409).json({ message: "An item with this SKU already exists." });
   }
@@ -77,6 +77,7 @@ export const createItem = asyncHandler(async (req, res) => {
   let item;
   try {
     item = await InventoryItem.create({
+      accountId: req.accountId,
       name,
       sku,
       category,
@@ -95,6 +96,7 @@ export const createItem = asyncHandler(async (req, res) => {
 
   if (quantity > 0) {
     await InventoryTransaction.create({
+      accountId: req.accountId,
       itemId: item._id,
       type: "in",
       quantity: roundMoney(quantity),
@@ -113,7 +115,7 @@ export const updateItem = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid item id." });
   }
 
-  const item = await InventoryItem.findById(id);
+  const item = await InventoryItem.findOne({ _id: id, accountId: req.accountId });
   if (!item) {
     return res.status(404).json({ message: "Item not found." });
   }
@@ -129,7 +131,7 @@ export const updateItem = asyncHandler(async (req, res) => {
   if (Object.prototype.hasOwnProperty.call(body, "sku")) {
     const sku = String(body.sku || "").trim();
     if (!sku) return res.status(400).json({ message: "SKU is required." });
-    const conflict = await InventoryItem.findOne({ sku, _id: { $ne: id } });
+    const conflict = await InventoryItem.findOne({ sku, _id: { $ne: id }, accountId: req.accountId });
     if (conflict) return res.status(409).json({ message: "An item with this SKU already exists." });
     item.sku = sku;
   }
@@ -183,12 +185,12 @@ export const deleteItem = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid item id." });
   }
 
-  const deleted = await InventoryItem.findByIdAndDelete(id);
+  const deleted = await InventoryItem.findOneAndDelete({ _id: id, accountId: req.accountId });
   if (!deleted) {
     return res.status(404).json({ message: "Item not found." });
   }
 
-  await InventoryTransaction.deleteMany({ itemId: id });
+  await InventoryTransaction.deleteMany({ itemId: id, accountId: req.accountId });
 
   return res.json({ ok: true });
 });
@@ -199,7 +201,7 @@ export const adjustQuantity = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid item id." });
   }
 
-  const item = await InventoryItem.findById(id);
+  const item = await InventoryItem.findOne({ _id: id, accountId: req.accountId });
   if (!item) {
     return res.status(404).json({ message: "Item not found." });
   }
@@ -235,6 +237,7 @@ export const adjustQuantity = asyncHandler(async (req, res) => {
   await item.save();
 
   const transaction = await InventoryTransaction.create({
+    accountId: req.accountId,
     itemId: item._id,
     type,
     quantity: roundMoney(qty),
@@ -257,7 +260,7 @@ export const listTransactions = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "Item not found." });
   }
 
-  const transactions = await InventoryTransaction.find({ itemId: id })
+  const transactions = await InventoryTransaction.find({ itemId: id, accountId: req.accountId })
     .sort({ createdAt: -1 })
     .lean();
 

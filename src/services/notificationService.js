@@ -24,14 +24,18 @@ export function isPushConfigured() {
   return ensureConfigured();
 }
 
-// Send one notification to every subscribed device. Dead subscriptions
-// (404/410) are pruned. Returns { sent, pruned }.
-export async function sendToAll({ title, body, url = "/", tag }) {
+// Send one notification to every device subscribed FOR ONE ACCOUNT. Dead
+// subscriptions (404/410) are pruned. Returns { sent, pruned }.
+//
+// Scoped deliberately: an unscoped send would push one business's low-stock and
+// revenue figures to another business's phone.
+export async function sendToAccount(accountId, { title, body, url = "/", tag }) {
+  if (!accountId) throw new Error("sendToAccount requires an accountId.");
   if (!ensureConfigured()) {
     return { sent: 0, pruned: 0, skipped: "vapid-not-configured" };
   }
 
-  const subscriptions = await PushSubscription.find().lean();
+  const subscriptions = await PushSubscription.find({ accountId }).lean();
   if (subscriptions.length === 0) {
     return { sent: 0, pruned: 0 };
   }
@@ -60,7 +64,7 @@ export async function sendToAll({ title, body, url = "/", tag }) {
   );
 
   if (deadIds.length > 0) {
-    await PushSubscription.deleteMany({ _id: { $in: deadIds } });
+    await PushSubscription.deleteMany({ accountId, _id: { $in: deadIds } });
   }
 
   return { sent, pruned: deadIds.length };

@@ -6,10 +6,10 @@ import {
   toStatus,
   toProductServiceType,
   resolveReferenceOption,
-  normalizeInstagramHandle,
-  getMainSettings
+  normalizeInstagramHandle
 } from "../utils.js";
-import { sendToAll } from "../services/notificationService.js";
+import { sendToAccount } from "../services/notificationService.js";
+import { Settings } from "../models/Settings.js";
 import {
   advanceDate,
   startOfUtcDay,
@@ -40,7 +40,9 @@ function computeInitialNextRun(startDate, frequency, interval) {
 }
 
 export const list = asyncHandler(async (_req, res) => {
-  const items = await RecurringEntry.find().sort({ active: -1, nextRunDate: 1 }).lean();
+  const items = await RecurringEntry.find({ accountId: req.accountId })
+    .sort({ active: -1, nextRunDate: 1 })
+    .lean();
   return res.json(items);
 });
 
@@ -112,7 +114,7 @@ export const create = asyncHandler(async (req, res) => {
   let customerReference = String(body.customerReference || "").trim();
   let customerOptionId = null;
 
-  const customerRefOption = await resolveReferenceOption("customer", body.customerOptionId);
+  const customerRefOption = await resolveReferenceOption(req.accountId, "customer", body.customerOptionId);
   if (customerRefOption.error) return res.status(400).json({ message: customerRefOption.error });
   if (customerRefOption.option) {
     customerName = customerRefOption.option.name;
@@ -131,7 +133,7 @@ export const create = asyncHandler(async (req, res) => {
   let productServicePrice = parsedProductPrice.value;
   let productServiceOptionId = null;
 
-  const productServiceRef = await resolveReferenceOption("product_service", body.productServiceOptionId);
+  const productServiceRef = await resolveReferenceOption(req.accountId, "product_service", body.productServiceOptionId);
   if (productServiceRef.error) return res.status(400).json({ message: productServiceRef.error });
   if (productServiceRef.option) {
     productServiceName = productServiceRef.option.name;
@@ -147,6 +149,7 @@ export const create = asyncHandler(async (req, res) => {
   const nextRunDate = computeInitialNextRun(startDate, frequency, safeInterval);
 
   const recurring = await RecurringEntry.create({
+    accountId: req.accountId,
     name,
     type,
     description,
@@ -184,7 +187,7 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid recurring entry id." });
   }
 
-  const existing = await RecurringEntry.findById(id);
+  const existing = await RecurringEntry.findOne({ _id: id, accountId: req.accountId });
   if (!existing) {
     return res.status(404).json({ message: "Recurring entry not found." });
   }
@@ -282,7 +285,7 @@ export const update = asyncHandler(async (req, res) => {
 
   // Customer reference handling (mirrors create): explicit optionId wins.
   if (bodyHas(body, "customerOptionId")) {
-    const ref = await resolveReferenceOption("customer", body.customerOptionId);
+    const ref = await resolveReferenceOption(req.accountId, "customer", body.customerOptionId);
     if (ref.error) return res.status(400).json({ message: ref.error });
     if (ref.option) {
       existing.customerOptionId = ref.optionId;
@@ -304,7 +307,7 @@ export const update = asyncHandler(async (req, res) => {
   if (bodyHas(body, "customerReference")) existing.customerReference = String(body.customerReference || "").trim();
 
   if (bodyHas(body, "productServiceOptionId")) {
-    const ref = await resolveReferenceOption("product_service", body.productServiceOptionId);
+    const ref = await resolveReferenceOption(req.accountId, "product_service", body.productServiceOptionId);
     if (ref.error) return res.status(400).json({ message: ref.error });
     if (ref.option) {
       existing.productServiceOptionId = ref.optionId;
@@ -337,7 +340,7 @@ export const remove = asyncHandler(async (req, res) => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ message: "Invalid recurring entry id." });
   }
-  const deleted = await RecurringEntry.findByIdAndDelete(id);
+  const deleted = await RecurringEntry.findOneAndDelete({ _id: id, accountId: req.accountId });
   if (!deleted) {
     return res.status(404).json({ message: "Recurring entry not found." });
   }
@@ -350,7 +353,7 @@ export const runOne = asyncHandler(async (req, res) => {
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ message: "Invalid recurring entry id." });
   }
-  const recurring = await RecurringEntry.findById(id);
+  const recurring = await RecurringEntry.findOne({ _id: id, accountId: req.accountId });
   if (!recurring) {
     return res.status(404).json({ message: "Recurring entry not found." });
   }
@@ -362,18 +365,26 @@ export const runOne = asyncHandler(async (req, res) => {
 export const runDue = asyncHandler(async (_req, res) => {
   const summary = await postAllDue();
 
-  // Notify the owner when the daily cron auto-posts recurring entries (rent,
-  // payroll, subscriptions, etc.), unless they've turned that notification off.
+  // Notify each owner about their own auto-posted entries. Grouping by account
+  // matters: a single broadcast would push one business's rent and payroll
+  // template names to every other business's devices.
   if (summary.totalPosted > 0) {
-    const settings = await getMainSettings();
-    if (settings?.notificationPrefs?.recurringPosted !== false) {
-      const names = summary.details.map((d) => d.name).join(", ");
-      await sendToAll({
+    const postedByAccount = new Map();
+    for (const detail of summary.details) {
+      if (!detail.accountId) continue;
+      const names = postedByAccount.get(detail.accountId) || [];
+      names.push(detail.name);
+      postedByAccount.set(detail.accountId, names);
+    }
+
+    for (const [accountId, names] of postedByAccount) {
+      const settings = await Settings.findById(accountId).select("notificationPrefs");
+      if (settings?.notificationPrefs?.recurringPosted === false) continue;
+
+      const label = names.join(", ");
+      await sendToAccount(accountId, {
         title: "Recurring entries posted",
-        body:
-          summary.totalPosted === 1
-            ? `Auto-posted: ${names}.`
-            : `Auto-posted ${summary.totalPosted} entries: ${names}.`,
+        body: names.length === 1 ? `Auto-posted: ${label}.` : `Auto-posted ${names.length} entries: ${label}.`,
         url: "/",
         tag: "recurring-posted"
       });

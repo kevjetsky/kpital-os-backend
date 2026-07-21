@@ -16,8 +16,10 @@ import {
 } from "../utils.js";
 import { REFERENCE_OPTION_KINDS } from "../constants.js";
 
-export const list = asyncHandler(async (_req, res) => {
-  const options = await ReferenceOption.find({}).sort({ kind: 1, name: 1 }).lean();
+export const list = asyncHandler(async (req, res) => {
+  const options = await ReferenceOption.find({ accountId: req.accountId })
+    .sort({ kind: 1, name: 1 })
+    .lean();
   const customers = [];
   const productServices = [];
 
@@ -47,6 +49,7 @@ export const create = asyncHandler(async (req, res) => {
   }
 
   const payload = {
+    accountId: req.accountId,
     kind,
     name,
     normalizedName: "",
@@ -72,7 +75,7 @@ export const create = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: "A phone number or Instagram username is required." });
     }
 
-    const duplicate = await findCustomerByContact(phone, instagram);
+    const duplicate = await findCustomerByContact(req.accountId, phone, instagram);
     if (duplicate) {
       return res.status(409).json({
         message: `A customer with this phone or Instagram already exists ("${duplicate.name}").`
@@ -144,7 +147,7 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid reference option id." });
   }
 
-  const existing = await ReferenceOption.findById(optionId);
+  const existing = await ReferenceOption.findOne({ _id: optionId, accountId: req.accountId });
   if (!existing) {
     return res.status(404).json({ message: "Reference option not found." });
   }
@@ -164,7 +167,7 @@ export const update = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: "A phone number or Instagram username is required." });
     }
 
-    const duplicate = await findCustomerByContact(phone, instagram, existing._id);
+    const duplicate = await findCustomerByContact(req.accountId, phone, instagram, existing._id);
     if (duplicate) {
       return res.status(409).json({
         message: `A customer with this phone or Instagram already exists ("${duplicate.name}").`
@@ -250,21 +253,21 @@ export const remove = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid reference option id." });
   }
 
-  const deleted = await ReferenceOption.findByIdAndDelete(optionId);
+  const deleted = await ReferenceOption.findOneAndDelete({ _id: optionId, accountId: req.accountId });
   if (!deleted) {
     return res.status(404).json({ message: "Reference option not found." });
   }
 
   if (deleted.kind === "customer") {
     await Entry.updateMany(
-      { customerOptionId: deleted._id },
+      { accountId: req.accountId, customerOptionId: deleted._id },
       { $set: { customerOptionId: null } }
     );
   }
 
   if (deleted.kind === "product_service") {
     await Entry.updateMany(
-      { productServiceOptionId: deleted._id },
+      { accountId: req.accountId, productServiceOptionId: deleted._id },
       { $set: { productServiceOptionId: null } }
     );
   }

@@ -1,7 +1,11 @@
 import mongoose from "mongoose";
+import { tenantGuard } from "./tenantGuard.js";
 
 const inventoryItemSchema = new mongoose.Schema(
   {
+    // Owning account (the Settings _id). Every query must be scoped by this;
+    // without it one business would read another's data.
+    accountId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
     name: { type: String, required: true, trim: true },
     sku: { type: String, required: true, trim: true },
     category: { type: String, default: "", trim: true },
@@ -18,8 +22,13 @@ const inventoryItemSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-inventoryItemSchema.index({ sku: 1 }, { unique: true });
-inventoryItemSchema.index({ category: 1 });
-inventoryItemSchema.index({ quantity: 1 });
+// SKUs are unique per account, not globally: two businesses can both stock
+// "HDMI-V21". The pre-tenancy index was { sku } and must be dropped — see
+// scripts/migrate-add-account-id.mjs.
+inventoryItemSchema.index({ accountId: 1, sku: 1 }, { unique: true });
+inventoryItemSchema.index({ accountId: 1, category: 1 });
+inventoryItemSchema.index({ accountId: 1, quantity: 1 });
+
+tenantGuard(inventoryItemSchema, { modelName: "InventoryItem" });
 
 export const InventoryItem = mongoose.model("InventoryItem", inventoryItemSchema);

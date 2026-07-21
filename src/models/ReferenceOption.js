@@ -1,7 +1,11 @@
 import mongoose from "mongoose";
+import { tenantGuard } from "./tenantGuard.js";
 
 const referenceOptionSchema = new mongoose.Schema(
   {
+    // Owning account (the Settings _id). Every query must be scoped by this;
+    // without it one business would read another's data.
+    accountId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
     kind: {
       type: String,
       required: true,
@@ -32,6 +36,11 @@ const referenceOptionSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-referenceOptionSchema.index({ kind: 1, normalizedName: 1 }, { unique: true });
+// Name uniqueness is per account: two businesses may both have a "Joystick Drift
+// Repair". The pre-tenancy index was { kind, normalizedName } and must be
+// dropped — see scripts/migrate-add-account-id.mjs.
+referenceOptionSchema.index({ accountId: 1, kind: 1, normalizedName: 1 }, { unique: true });
+
+tenantGuard(referenceOptionSchema, { modelName: "ReferenceOption" });
 
 export const ReferenceOption = mongoose.model("ReferenceOption", referenceOptionSchema);

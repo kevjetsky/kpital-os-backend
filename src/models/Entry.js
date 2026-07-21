@@ -1,7 +1,11 @@
 import mongoose from "mongoose";
+import { tenantGuard } from "./tenantGuard.js";
 
 const entrySchema = new mongoose.Schema(
   {
+    // Owning account (the Settings _id). Every query must be scoped by this;
+    // without it one business would read another's financial records.
+    accountId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
     date: { type: Date, required: true },
     type: {
       type: String,
@@ -68,9 +72,13 @@ const entrySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-entrySchema.index({ date: -1, createdAt: -1 });
-entrySchema.index({ type: 1, status: 1, date: -1 });
-entrySchema.index({ customerOptionId: 1, type: 1, date: -1 });
-entrySchema.index({ isWarrantyCallback: 1, date: -1 });
+// accountId leads every index: all reads are scoped to one account, so it must
+// be the first key for these to be usable.
+entrySchema.index({ accountId: 1, date: -1, createdAt: -1 });
+entrySchema.index({ accountId: 1, type: 1, status: 1, date: -1 });
+entrySchema.index({ accountId: 1, customerOptionId: 1, type: 1, date: -1 });
+entrySchema.index({ accountId: 1, isWarrantyCallback: 1, date: -1 });
+
+tenantGuard(entrySchema, { modelName: "Entry" });
 
 export const Entry = mongoose.model("Entry", entrySchema);
