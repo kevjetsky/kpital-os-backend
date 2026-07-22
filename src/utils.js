@@ -131,6 +131,19 @@ export async function findCustomerByContact(accountId, phone, instagram, exclude
   const instagramKey = normalizeInstagramHandle(instagram);
   if (!phoneKey && !instagramKey) return null;
 
+  const directFilters = [];
+  if (phoneKey) directFilters.push({ phoneKey });
+  if (instagramKey) directFilters.push({ instagramKey });
+  const direct = await ReferenceOption.findOne({
+    accountId,
+    kind: "customer",
+    ...(excludeId ? { _id: { $ne: excludeId } } : {}),
+    $or: directFilters
+  }).lean();
+  if (direct) return direct;
+
+  // Compatibility fallback for customers created before normalized keys were
+  // introduced. Updated records are backfilled and use the indexed path.
   const customers = await ReferenceOption.find({ accountId, kind: "customer" }).lean();
   return (
     customers.find((customer) => {
@@ -310,4 +323,17 @@ export function asyncHandler(handler) {
   return (req, res, next) => {
     Promise.resolve(handler(req, res, next)).catch(next);
   };
+}
+
+export async function withTransaction(work) {
+  const session = await mongoose.startSession();
+  try {
+    let result;
+    await session.withTransaction(async () => {
+      result = await work(session);
+    });
+    return result;
+  } finally {
+    await session.endSession();
+  }
 }

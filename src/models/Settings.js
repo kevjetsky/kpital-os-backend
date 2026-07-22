@@ -40,5 +40,9 @@ settingsSchema.index(
   { email: 1 },
   { unique: true, partialFilterExpression: { email: { $gt: "" } } }
 );
+settingsSchema.index(
+  { key: 1 },
+  { unique: true, partialFilterExpression: { key: "main" } }
+);
 
 export const Settings = mongoose.model("Settings", settingsSchema);

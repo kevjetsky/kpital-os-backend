@@ -35,8 +35,8 @@ async function connectDatabase() {
 
   if (useMemoryDb) {
     console.log("Starting in-memory MongoDB for local development.");
-    const { MongoMemoryServer } = await import("mongodb-memory-server");
-    memoryServer = await MongoMemoryServer.create();
+    const { MongoMemoryReplSet } = await import("mongodb-memory-server");
+    memoryServer = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
     await mongoose.connect(memoryServer.getUri(), {
       serverSelectionTimeoutMS,
       connectTimeoutMS
@@ -57,8 +57,8 @@ async function connectDatabase() {
     }
 
     console.warn("Configured MongoDB connection failed. Starting an in-memory database for local development.");
-    const { MongoMemoryServer } = await import("mongodb-memory-server");
-    memoryServer = await MongoMemoryServer.create();
+    const { MongoMemoryReplSet } = await import("mongodb-memory-server");
+    memoryServer = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
     await mongoose.connect(memoryServer.getUri(), {
       serverSelectionTimeoutMS,
       connectTimeoutMS

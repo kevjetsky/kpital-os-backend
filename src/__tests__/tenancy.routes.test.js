@@ -10,7 +10,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
 import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
-import { MongoMemoryServer } from "mongodb-memory-server";
+import { MongoMemoryReplSet } from "mongodb-memory-server";
 import bcrypt from "bcryptjs";
 import app from "../app.js";
 import { Settings } from "../models/Settings.js";
@@ -31,7 +31,7 @@ function tokenFor(accountId) {
 const authed = (req, token) => req.set("Authorization", `Bearer ${token}`);
 
 beforeAll(async () => {
-  mongod = await MongoMemoryServer.create();
+  mongod = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   process.env.JWT_SECRET = "test-secret-for-tests-only";
   process.env.MONGODB_URI = mongod.getUri();
   await mongoose.connect(mongod.getUri());
@@ -168,6 +168,32 @@ describe("account isolation", () => {
 
     const check = await authed(request(app).get("/api/inventory"), tokenB);
     expect(check.body[0].quantity).toBe(10);
+  });
+
+  it("atomically prevents concurrent records from overselling inventory", async () => {
+    const item = await authed(request(app).post("/api/inventory"), tokenA).send({
+      name: "Limited Part",
+      sku: "LIMITED-1",
+      quantity: 5,
+      costPerUnit: 10,
+    });
+
+    const payload = {
+      type: "Expenses",
+      date: "2026-06-01",
+      description: "Concurrent inventory use",
+      inventoryUsage: [{ itemId: item.body._id, quantity: 4 }],
+    };
+    const results = await Promise.all([
+      authed(request(app).post("/api/entries"), tokenA).send(payload),
+      authed(request(app).post("/api/entries"), tokenA).send(payload),
+    ]);
+
+    expect(results.map((result) => result.status).sort()).toEqual([201, 400]);
+    const inventory = await authed(request(app).get("/api/inventory"), tokenA);
+    expect(inventory.body[0].quantity).toBe(1);
+    const entries = await authed(request(app).get("/api/entries"), tokenA);
+    expect(entries.body).toHaveLength(1);
   });
 
   it("scopes tax liability per account", async () => {

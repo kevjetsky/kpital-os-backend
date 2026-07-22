@@ -8,6 +8,7 @@ import {
   normalizeOptionName,
   normalizeAddressField,
   normalizeInstagramHandle,
+  normalizePhoneKey,
   formatCustomerAddress,
   toProductServiceType,
   serializeReferenceOption,
@@ -54,7 +55,9 @@ export const create = asyncHandler(async (req, res) => {
     name,
     normalizedName: "",
     phone: "",
+    phoneKey: "",
     instagram: "",
+    instagramKey: "",
     email: "",
     address: "",
     addressLine1: "",
@@ -96,7 +99,9 @@ export const create = asyncHandler(async (req, res) => {
     name = deriveCustomerName(name, phone, instagram);
     payload.name = name;
     payload.phone = phone;
+    payload.phoneKey = normalizePhoneKey(phone);
     payload.instagram = instagram;
+    payload.instagramKey = normalizeInstagramHandle(instagram);
     payload.email = email;
     payload.address = formattedAddress || legacyAddress;
     payload.addressLine1 = addressLine1;
@@ -175,7 +180,9 @@ export const update = asyncHandler(async (req, res) => {
     }
 
     existing.phone = phone;
+    existing.phoneKey = normalizePhoneKey(phone);
     existing.instagram = instagram;
+    existing.instagramKey = normalizeInstagramHandle(instagram);
     name = deriveCustomerName(name, phone, instagram);
 
     const addressLine1 = hasOwn("addressLine1")

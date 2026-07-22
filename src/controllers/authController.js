@@ -75,6 +75,12 @@ function emailMatches(settings, email) {
   return settings.email && settings.email === normalizeEmail(email);
 }
 
+function authResponse(req, token) {
+  // Browser sessions use the HttpOnly cookie. Non-browser clients such as the
+  // MCP worker have no Origin header and receive the bearer token explicitly.
+  return req.headers.origin ? { ok: true } : { ok: true, token };
+}
+
 export const status = asyncHandler(async (req, res) => {
   // With multiple accounts, status can no longer describe "the" account: it only
   // reports whether this deployment has been initialised, plus whether the
@@ -162,7 +168,7 @@ export const login = asyncHandler(async (req, res) => {
 
   const token = issueAuthToken(settings._id);
   setAuthCookie(res, token);
-  return res.json({ ok: true, token });
+  return res.json(authResponse(req, token));
 });
 
 export const verifyEmail = asyncHandler(async (req, res) => {
@@ -188,7 +194,7 @@ export const verifyEmail = asyncHandler(async (req, res) => {
 
   const token = issueAuthToken(settings._id);
   setAuthCookie(res, token);
-  return res.json({ ok: true, token });
+  return res.json(authResponse(req, token));
 });
 
 export const forgotPassword = asyncHandler(async (req, res) => {
@@ -196,7 +202,7 @@ export const forgotPassword = asyncHandler(async (req, res) => {
 
   const settings = await findAccountByEmail(email);
   if (!settings) {
-    return res.status(401).json({ message: "Invalid request." });
+    return res.json({ ok: true, requiresReset: true });
   }
 
   await issueVerificationCode(settings, "reset");
@@ -224,7 +230,7 @@ export const resetPassword = asyncHandler(async (req, res) => {
 
   const token = issueAuthToken(settings._id);
   setAuthCookie(res, token);
-  return res.json({ ok: true, token });
+  return res.json(authResponse(req, token));
 });
 
 export const resendCode = asyncHandler(async (req, res) => {

@@ -72,6 +72,8 @@ const entrySchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+entrySchema.set("optimisticConcurrency", true);
+
 // accountId leads every index: all reads are scoped to one account, so it must
 // be the first key for these to be usable.
 entrySchema.index({ accountId: 1, date: -1, createdAt: -1 });

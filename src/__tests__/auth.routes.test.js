@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
 import request from "supertest";
 import mongoose from "mongoose";
-import { MongoMemoryServer } from "mongodb-memory-server";
+import { MongoMemoryReplSet } from "mongodb-memory-server";
 
 const sentEmails = [];
 vi.mock("../services/emailService.js", () => ({
@@ -20,7 +20,7 @@ let mongod;
 const EMAIL = "owner@example.com";
 
 beforeAll(async () => {
-  mongod = await MongoMemoryServer.create();
+  mongod = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   process.env.JWT_SECRET = "test-secret-for-tests-only";
   process.env.MONGODB_URI = mongod.getUri();
   await mongoose.connect(mongod.getUri());
@@ -195,6 +195,25 @@ describe("POST /api/auth/login", () => {
     expect(res.body.token).toBeTruthy();
   });
 
+  it("uses only an HttpOnly cookie for browser-origin logins", async () => {
+    await setupVerifiedAccount("mypassword");
+    const res = await request(app)
+      .post("/api/auth/login")
+      .set("Origin", "http://localhost:3000")
+      .send({ email: EMAIL, password: "mypassword" });
+    expect(res.status).toBe(200);
+    expect(res.body.token).toBeUndefined();
+    expect(res.headers["set-cookie"]?.[0]).toContain("HttpOnly");
+  });
+
+  it("rejects unsafe requests from an untrusted browser origin", async () => {
+    const res = await request(app)
+      .post("/api/auth/login")
+      .set("Origin", "https://attacker.example")
+      .send({ email: EMAIL, password: "mypassword" });
+    expect(res.status).toBe(403);
+  });
+
   it("is case-insensitive on email", async () => {
     await setupVerifiedAccount("mypassword");
     const res = await request(app)
@@ -272,12 +291,13 @@ describe("POST /api/auth/forgot-password + reset-password", () => {
     expect(login.status).toBe(200);
   });
 
-  it("rejects forgot-password for an unknown email", async () => {
+  it("does not reveal whether a forgot-password email exists", async () => {
     await setupVerifiedAccount("oldpassword");
     const res = await request(app)
       .post("/api/auth/forgot-password")
       .send({ email: "other@example.com" });
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, requiresReset: true });
   });
 
   it("does not accept an email-verification code for a password reset", async () => {

@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import { InventoryItem } from "../models/InventoryItem.js";
 import { InventoryTransaction } from "../models/InventoryTransaction.js";
-import { asyncHandler, roundMoney } from "../utils.js";
+import { asyncHandler, roundMoney, withTransaction } from "../utils.js";
 
 export const listItems = asyncHandler(async (req, res) => {
   const { category, lowStock } = req.query;
@@ -115,11 +115,6 @@ export const updateItem = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid item id." });
   }
 
-  const item = await InventoryItem.findOne({ _id: id, accountId: req.accountId });
-  if (!item) {
-    return res.status(404).json({ message: "Item not found." });
-  }
-
   const body = req.body ?? {};
 
   if (Object.prototype.hasOwnProperty.call(body, "name")) {
@@ -201,11 +196,6 @@ export const adjustQuantity = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid item id." });
   }
 
-  const item = await InventoryItem.findOne({ _id: id, accountId: req.accountId });
-  if (!item) {
-    return res.status(404).json({ message: "Item not found." });
-  }
-
   const body = req.body ?? {};
   const type = String(body.type || "").trim();
   if (!["in", "out", "adjustment"].includes(type)) {
@@ -218,32 +208,39 @@ export const adjustQuantity = asyncHandler(async (req, res) => {
   }
 
   const reason = String(body.reason || "").trim();
-  const quantityBefore = item.quantity;
-  let quantityAfter;
+  let item;
+  let transaction;
+  await withTransaction(async (session) => {
+    const filter = { _id: id, accountId: req.accountId };
+    const update = type === "adjustment"
+      ? { $set: { quantity: roundMoney(qty) } }
+      : { $inc: { quantity: type === "in" ? roundMoney(qty) : -roundMoney(qty) } };
+    if (type === "out") filter.quantity = { $gte: qty };
+    if (type === "in") update.$set = { lastRestockedAt: new Date() };
 
-  if (type === "in") {
-    quantityAfter = roundMoney(quantityBefore + qty);
-    item.lastRestockedAt = new Date();
-  } else if (type === "out") {
-    quantityAfter = roundMoney(quantityBefore - qty);
-    if (quantityAfter < 0) {
-      return res.status(400).json({ message: "Quantity cannot go below zero." });
+    const previous = await InventoryItem.findOneAndUpdate(filter, update, { new: false, session });
+    if (!previous) {
+      const exists = await InventoryItem.exists({ _id: id, accountId: req.accountId }).session(session);
+      throw Object.assign(
+        new Error(exists ? "Quantity cannot go below zero." : "Item not found."),
+        { status: exists ? 400 : 404 }
+      );
     }
-  } else {
-    quantityAfter = roundMoney(qty);
-  }
 
-  item.quantity = quantityAfter;
-  await item.save();
-
-  const transaction = await InventoryTransaction.create({
-    accountId: req.accountId,
-    itemId: item._id,
-    type,
-    quantity: roundMoney(qty),
-    reason,
-    quantityBefore,
-    quantityAfter
+    const quantityBefore = previous.quantity;
+    const quantityAfter = type === "adjustment"
+      ? roundMoney(qty)
+      : roundMoney(quantityBefore + (type === "in" ? qty : -qty));
+    item = await InventoryItem.findOne({ _id: id, accountId: req.accountId }).session(session);
+    [transaction] = await InventoryTransaction.create([{
+      accountId: req.accountId,
+      itemId: previous._id,
+      type,
+      quantity: roundMoney(qty),
+      reason,
+      quantityBefore,
+      quantityAfter
+    }], { session });
   });
 
   return res.json({ item, transaction });
@@ -255,7 +252,7 @@ export const listTransactions = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid item id." });
   }
 
-  const exists = await InventoryItem.exists({ _id: id });
+  const exists = await InventoryItem.exists({ _id: id, accountId: req.accountId });
   if (!exists) {
     return res.status(404).json({ message: "Item not found." });
   }

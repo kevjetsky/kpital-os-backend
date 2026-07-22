@@ -9,7 +9,7 @@ export const loginSchema = z.object({
 
 export const setupSchema = z.object({
   email: emailField,
-  password: z.string().min(4, "Password must be at least 4 characters.")
+  password: z.string().min(8, "Password must be at least 8 characters.")
 });
 
 // New accounts get a stronger minimum than the legacy 4-character setup rule:
@@ -32,7 +32,7 @@ export const forgotPasswordSchema = z.object({ email: emailField });
 export const resetPasswordSchema = z.object({
   email: emailField,
   code: z.string().trim().regex(/^\d{6}$/, "Code must be 6 digits."),
-  newPassword: z.string().min(4, "Password must be at least 4 characters.")
+  newPassword: z.string().min(8, "Password must be at least 8 characters.")
 });
 
 export const createEntrySchema = z.object({

@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import request from "supertest";
 import mongoose from "mongoose";
-import { MongoMemoryServer } from "mongodb-memory-server";
+import { MongoMemoryReplSet } from "mongodb-memory-server";
 import bcrypt from "bcryptjs";
 import app from "../app.js";
 import { Settings } from "../models/Settings.js";
@@ -11,7 +11,7 @@ let token;
 let passwordHash;
 
 beforeAll(async () => {
-  mongod = await MongoMemoryServer.create();
+  mongod = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   process.env.JWT_SECRET = "test-secret-for-tests-only";
   process.env.MONGODB_URI = mongod.getUri();
   await mongoose.connect(mongod.getUri());

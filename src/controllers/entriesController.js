@@ -14,10 +14,12 @@ import {
   toPaymentMethod,
   resolveReferenceOption,
   normalizeInstagramHandle,
+  normalizePhoneKey,
   normalizeOptionName,
   deriveCustomerName,
   findCustomerByContact,
-  toAccountObjectId
+  toAccountObjectId,
+  withTransaction
 } from "../utils.js";
 import {
   ENTRY_TYPES,
@@ -44,6 +46,8 @@ async function linkOrCreateCustomer(accountId, { name, phone, instagram, email, 
     const fills = {};
     if (phone && !match.phone) fills.phone = phone;
     if (instagram && !match.instagram) fills.instagram = instagram;
+    if (phone) fills.phoneKey = normalizePhoneKey(phone);
+    if (instagram) fills.instagramKey = normalizeInstagramHandle(instagram);
     if (email && !match.email) fills.email = email;
     if (Object.keys(fills).length > 0) {
       await ReferenceOption.updateOne({ _id: match._id, accountId }, { $set: fills });
@@ -58,7 +62,9 @@ async function linkOrCreateCustomer(accountId, { name, phone, instagram, email, 
     name: baseName,
     normalizedName: normalizeOptionName(baseName),
     phone: phone || "",
+    phoneKey: normalizePhoneKey(phone),
     instagram: instagram || "",
+    instagramKey: normalizeInstagramHandle(instagram),
     email: email || "",
     address: address || "",
     reference: reference || ""
@@ -181,7 +187,7 @@ function usageQuantityMap(usage = []) {
   return map;
 }
 
-async function reconcileInventoryUsage(accountId, previousUsage, nextUsage, reason) {
+async function reconcileInventoryUsage(accountId, previousUsage, nextUsage, reason, session) {
   const previous = usageQuantityMap(previousUsage);
   const next = usageQuantityMap(nextUsage);
   const itemIds = Array.from(new Set([...previous.keys(), ...next.keys()]));
@@ -190,17 +196,18 @@ async function reconcileInventoryUsage(accountId, previousUsage, nextUsage, reas
     const delta = roundMoney((next.get(itemId) || 0) - (previous.get(itemId) || 0));
     if (delta === 0) continue;
 
-    const item = await InventoryItem.findOne({ _id: itemId, accountId });
+    const quantityChange = -delta;
+    const filter = { _id: itemId, accountId };
+    if (delta > 0) filter.quantity = { $gte: delta };
+    const item = await InventoryItem.findOneAndUpdate(
+      filter,
+      { $inc: { quantity: quantityChange } },
+      { new: false, session }
+    );
     if (!item) throw Object.assign(new Error("Inventory item not found."), { status: 400 });
     const quantityBefore = item.quantity;
-    const quantityAfter = roundMoney(quantityBefore - delta);
-    if (quantityAfter < 0) {
-      throw Object.assign(new Error(`Not enough stock for ${item.name}.`), { status: 400 });
-    }
-
-    item.quantity = quantityAfter;
-    await item.save();
-    await InventoryTransaction.create({
+    const quantityAfter = roundMoney(quantityBefore + quantityChange);
+    await InventoryTransaction.create([{
       accountId,
       itemId: item._id,
       type: delta > 0 ? "out" : "in",
@@ -208,7 +215,7 @@ async function reconcileInventoryUsage(accountId, previousUsage, nextUsage, reas
       reason,
       quantityBefore,
       quantityAfter
-    });
+    }], { session });
   }
 }
 
@@ -569,6 +576,8 @@ export const create = asyncHandler(async (req, res) => {
     const fills = {};
     if (customerPhone && !option.phone) fills.phone = customerPhone;
     if (customerInstagram && !option.instagram) fills.instagram = customerInstagram;
+    if (customerPhone) fills.phoneKey = normalizePhoneKey(customerPhone);
+    if (customerInstagram) fills.instagramKey = normalizeInstagramHandle(customerInstagram);
     if (Object.keys(fills).length > 0) {
       await ReferenceOption.updateOne({ _id: option._id, accountId: req.accountId }, { $set: fills });
     }
@@ -629,7 +638,9 @@ export const create = asyncHandler(async (req, res) => {
   const amounts = computeAmounts(income, expense, type, rawTaxRate);
   await assertInventoryUsageAvailable(req.accountId, [], inventory.usage);
 
-  const entry = await Entry.create({
+  let entry;
+  await withTransaction(async (session) => {
+    [entry] = await Entry.create([{
     accountId: req.accountId,
     date,
     type,
@@ -655,8 +666,9 @@ export const create = asyncHandler(async (req, res) => {
     callbackOf: callback.callbackOf,
     callbackReason: callback.callbackReason,
     status
+    }], { session });
+    await reconcileInventoryUsage(req.accountId, [], inventory.usage, `Used on record ${entry._id}`, session);
   });
-  await reconcileInventoryUsage(req.accountId, [], inventory.usage, `Used on record ${entry._id}`);
 
   return res.status(201).json(entry);
 });
@@ -846,6 +858,8 @@ export const update = asyncHandler(async (req, res) => {
       const fills = {};
       if (customerPhone && !option.phone) fills.phone = customerPhone;
       if (customerInstagram && !option.instagram) fills.instagram = customerInstagram;
+      if (customerPhone) fills.phoneKey = normalizePhoneKey(customerPhone);
+      if (customerInstagram) fills.instagramKey = normalizeInstagramHandle(customerInstagram);
       if (Object.keys(fills).length > 0) {
         await ReferenceOption.updateOne({ _id: option._id, accountId: req.accountId }, { $set: fills });
       }
@@ -959,8 +973,17 @@ export const update = asyncHandler(async (req, res) => {
   existing.callbackOf = callback.callbackOf;
   existing.callbackReason = callback.callbackReason;
 
-  await existing.save();
-  await reconcileInventoryUsage(req.accountId, previousUsage, inventory.usage, `Updated record ${existing._id}`);
+  await withTransaction(async (session) => {
+    existing.$session(session);
+    await existing.save({ session });
+    await reconcileInventoryUsage(
+      req.accountId,
+      previousUsage,
+      inventory.usage,
+      `Updated record ${existing._id}`,
+      session
+    );
+  });
   return res.json(existing);
 });
 
@@ -970,12 +993,22 @@ export const remove = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid entry id." });
   }
 
-  const deleted = await Entry.findOneAndDelete({ _id: entryId, accountId: req.accountId });
+  let deleted;
+  await withTransaction(async (session) => {
+    deleted = await Entry.findOneAndDelete({ _id: entryId, accountId: req.accountId }, { session });
+    if (deleted) {
+      await reconcileInventoryUsage(
+        req.accountId,
+        deleted.inventoryUsage || [],
+        [],
+        `Deleted record ${deleted._id}`,
+        session
+      );
+    }
+  });
   if (!deleted) {
     return res.status(404).json({ message: "Entry not found." });
   }
-  await reconcileInventoryUsage(req.accountId, deleted.inventoryUsage || [], [], `Deleted record ${deleted._id}`);
-
   return res.json({ ok: true });
 });
 
