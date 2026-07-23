@@ -275,11 +275,22 @@ export function getAuthCookieOptions() {
       ? process.env.NODE_ENV === "production"
       : String(secureFromEnv).toLowerCase() === "true";
 
-  return {
+  const options = {
     httpOnly: true,
     sameSite: cookieSameSite,
     secure
   };
+
+  // When the API and the app live on sibling subdomains (e.g. api.kpitaltech.com
+  // and os.kpitaltech.com), scope the cookie to the shared parent domain so it is
+  // first-party for the whole site. Leave COOKIE_DOMAIN unset for a host-only
+  // cookie (single-host or same-origin-proxy setups).
+  const domain = String(process.env.COOKIE_DOMAIN || "").trim();
+  if (domain) {
+    options.domain = domain;
+  }
+
+  return options;
 }
 
 export function setAuthCookie(res, token) {
