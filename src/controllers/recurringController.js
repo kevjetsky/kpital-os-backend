@@ -39,7 +39,7 @@ function computeInitialNextRun(startDate, frequency, interval) {
   return next;
 }
 
-export const list = asyncHandler(async (_req, res) => {
+export const list = asyncHandler(async (req, res) => {
   const items = await RecurringEntry.find({ accountId: req.accountId })
     .sort({ active: -1, nextRunDate: 1 })
     .lean();
