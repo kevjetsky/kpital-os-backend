@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import compression from "compression";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import morgan from "morgan";
@@ -49,6 +50,10 @@ function isAllowedOrigin(origin) {
 const app = express();
 
 app.disable("x-powered-by");
+// The dashboard pulls the full entry list on load; over cellular that response
+// dominates load time, and JSON of this shape gzips to a fraction of its size.
+// App Engine's Node runtime does not compress for us.
+app.use(compression());
 app.use(helmet());
 app.use(morgan("combined"));
 app.use(

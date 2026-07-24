@@ -314,6 +314,106 @@ export const list = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/entries/summary?from&to[&year&quarter]
+//
+// The dashboard's headline numbers used to be derived in the browser from the
+// full entry list, which meant downloading every record the account has ever
+// had just to render four totals. This computes them in Mongo instead; the
+// { accountId, date } index covers the range match.
+//
+// The quarter defaults to the server's current UTC quarter, but the client
+// should pass its own year/quarter so "this quarter" means the same thing on a
+// phone west of UTC as it does on the server.
+export const summary = asyncHandler(async (req, res) => {
+  const { from, to, year, quarter } = req.query;
+
+  const now = new Date();
+  const toDate = to ? new Date(String(to)) : now;
+  const fromDate = from ? new Date(String(from)) : new Date(toDate.getFullYear(), 0, 1);
+  if (Number.isNaN(fromDate.getTime()) || Number.isNaN(toDate.getTime())) {
+    return res.status(400).json({ message: "Invalid from/to date." });
+  }
+  if (fromDate > toDate) {
+    return res.status(400).json({ message: "'from' must be before 'to'." });
+  }
+  // `to` arrives as a calendar day (2026-06-30), which parses to that day's
+  // midnight; without this the last day of the range would be excluded.
+  const rangeEnd = new Date(toDate.getTime());
+  if (rangeEnd.getUTCHours() === 0 && rangeEnd.getUTCMinutes() === 0 && rangeEnd.getUTCSeconds() === 0) {
+    rangeEnd.setUTCHours(23, 59, 59, 999);
+  }
+
+  const quarterYear = year === undefined ? now.getUTCFullYear() : Number(year);
+  const quarterNumber = quarter === undefined ? Math.floor(now.getUTCMonth() / 3) + 1 : Number(quarter);
+  if (!Number.isInteger(quarterYear) || quarterYear < 1970 || quarterYear > 9999) {
+    return res.status(400).json({ message: "Invalid year." });
+  }
+  if (!Number.isInteger(quarterNumber) || quarterNumber < 1 || quarterNumber > 4) {
+    return res.status(400).json({ message: "Quarter must be between 1 and 4." });
+  }
+  const quarterStart = new Date(Date.UTC(quarterYear, (quarterNumber - 1) * 3, 1));
+  const quarterEnd = new Date(Date.UTC(quarterYear, quarterNumber * 3, 1));
+
+  const accountId = toAccountObjectId(req.accountId);
+
+  const [rangeRows, statusRows, quarterRows] = await Promise.all([
+    Entry.aggregate([
+      { $match: { accountId, date: { $gte: fromDate, $lte: rangeEnd } } },
+      {
+        $group: {
+          _id: null,
+          income: { $sum: "$income" },
+          expense: { $sum: "$expense" },
+          salesTax: { $sum: "$salesTax" },
+          net: { $sum: "$netProfit" },
+          count: { $sum: 1 }
+        }
+      }
+    ]),
+    // Account-wide, deliberately not range-scoped: the action cards count every
+    // open record, not just the ones in the selected period.
+    Entry.aggregate([
+      { $match: { accountId } },
+      { $group: { _id: "$status", count: { $sum: 1 } } }
+    ]),
+    Entry.aggregate([
+      { $match: { accountId, date: { $gte: quarterStart, $lt: quarterEnd } } },
+      { $group: { _id: null, salesTax: { $sum: "$salesTax" } } }
+    ])
+  ]);
+
+  const totals = rangeRows[0] || {};
+  const statusCounts = { Pending: 0, Completed: 0, Paid: 0 };
+  let totalRecords = 0;
+  for (const row of statusRows) {
+    if (row._id in statusCounts) statusCounts[row._id] = row.count;
+    totalRecords += row.count;
+  }
+
+  return res.json({
+    range: {
+      from: fromDate.toISOString(),
+      to: rangeEnd.toISOString(),
+      income: roundMoney(totals.income || 0),
+      expense: roundMoney(totals.expense || 0),
+      salesTax: roundMoney(totals.salesTax || 0),
+      net: roundMoney(totals.net || 0),
+      count: totals.count || 0
+    },
+    statusCounts,
+    totalRecords,
+    // Derived here so the client does not have to know that "unpaid" means
+    // anything that is not Paid.
+    pendingRecords: statusCounts.Pending,
+    unpaidRecords: totalRecords - statusCounts.Paid,
+    quarter: {
+      year: quarterYear,
+      quarter: quarterNumber,
+      salesTax: roundMoney(quarterRows[0]?.salesTax || 0)
+    }
+  });
+});
+
 // GET /api/entries/warranty-candidates
 // Given a customer (customerOptionId, or phone/instagram to match), returns
 // their recent Repair entries inside the warranty window — the jobs a new
