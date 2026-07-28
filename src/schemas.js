@@ -36,7 +36,7 @@ export const resetPasswordSchema = z.object({
 });
 
 export const createEntrySchema = z.object({
-  type: z.enum(["Repair", "Sales", "Expenses", "Tip"]),
+  type: z.enum(["Sales", "Repair", "Expenses", "Refund", "Payroll"]),
   date: z.string().min(1),
   description: z.string().optional().default(""),
   income: z.number().min(0).optional().default(0),
@@ -45,6 +45,8 @@ export const createEntrySchema = z.object({
   notes: z.string().optional().default(""),
   customerOptionId: z.string().nullable().optional(),
   productServiceOptionId: z.string().nullable().optional(),
+  // The sale or repair a Refund hands money back for. Ignored on other types.
+  refundOf: z.string().nullable().optional(),
   customerName: z.string().optional().default(""),
   customerPhone: z.string().optional().default(""),
   customerInstagram: z.string().optional().default(""),

@@ -34,6 +34,21 @@ describe("computeAmounts", () => {
     expect(result.income).toBe(0);
     expect(result.expense).toBe(0);
   });
+  it("reverses salesTax on a Refund so it nets against the sale that collected it", () => {
+    const sale = computeAmounts(100, 0, "Sales");
+    const refund = computeAmounts(0, 100, "Refund");
+    expect(refund.salesTax).toBe(-8.25);
+    expect(sale.salesTax + refund.salesTax).toBe(0);
+    // The $8.25 of tax was carved out of the $100 taken in, so handing the $100
+    // back costs the business only the $91.75 it actually kept.
+    expect(refund.netProfit).toBe(-91.75);
+    expect(sale.netProfit + refund.netProfit).toBe(0);
+  });
+  it("taxes Payroll like any other outflow: nothing, since no income came in", () => {
+    const result = computeAmounts(0, 500, "Payroll");
+    expect(result.salesTax).toBe(0);
+    expect(result.netProfit).toBe(-500);
+  });
 });
 
 describe("parseMoneyInput", () => {

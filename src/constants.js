@@ -1,11 +1,15 @@
 export const SALES_TAX_RATE = 0.0825;
-export const ENTRY_TYPES = ["Repair", "Sales", "Expenses", "Tip"];
-export const TAX_EXEMPT_ENTRY_TYPES = ["Tip"];
+export const ENTRY_TYPES = ["Sales", "Repair", "Expenses", "Refund", "Payroll"];
+// A refund hands back money that was booked as income with sales tax carved out
+// of it, so it also hands back the tax: salesTax goes negative at the current
+// rate, which nets against the quarter's collected total.
+export const TAX_REVERSING_ENTRY_TYPES = ["Refund"];
 // "Parts" was removed: parts are inventory and hit the books as COGS at the
 // moment they're consumed on a repair/sale (see inventory usage), so a separate
 // Parts expense line would double-count. "Tools & Equipment" covers gear that is
 // simply an expense the day it's bought (screwdrivers, heat gun, etc.).
-export const EXPENSE_CATEGORIES = ["Rent", "Tools & Equipment", "Marketing", "Utilities", "Payroll", "Other"];
+// "Payroll" was removed too — it's its own entry type now.
+export const EXPENSE_CATEGORIES = ["Rent", "Gas", "Tools & Equipment", "Marketing", "Utilities", "Other"];
 export const ENTRY_STATUSES = ["Pending", "Completed", "Paid"];
 export const PAYMENT_METHODS = ["Cash", "Card", "Zelle", "Cash App", "Chime", "PayPal", "Venmo", "Apple Pay", "Other"];
 // Entry types that represent customer-facing work and therefore require a

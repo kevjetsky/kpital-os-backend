@@ -14,6 +14,7 @@ import backupRouter from "./routes/backup.js";
 import taxRouter from "./routes/tax.js";
 import pushRouter from "./routes/push.js";
 import notificationsRouter from "./routes/notifications.js";
+import smsRouter from "./routes/sms.js";
 
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
 
@@ -90,6 +91,7 @@ app.use("/api/backup", backupRouter);
 app.use("/api/tax", taxRouter);
 app.use("/api/push", pushRouter);
 app.use("/api/notifications", notificationsRouter);
+app.use("/api/sms", smsRouter);
 
 if (process.env.SENTRY_DSN) {
   const Sentry = await import("@sentry/node");

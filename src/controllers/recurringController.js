@@ -56,7 +56,7 @@ export const create = asyncHandler(async (req, res) => {
 
   const type = String(body.type || "");
   if (!ENTRY_TYPES.includes(type)) {
-    return res.status(400).json({ message: "Type must be Repair, Sales, Expenses, or Tip." });
+    return res.status(400).json({ message: `Type must be one of: ${ENTRY_TYPES.join(", ")}.` });
   }
 
   const frequency = String(body.frequency || "monthly");
@@ -203,7 +203,7 @@ export const update = asyncHandler(async (req, res) => {
   if (bodyHas(body, "type")) {
     const type = String(body.type || "");
     if (!ENTRY_TYPES.includes(type)) {
-      return res.status(400).json({ message: "Type must be Repair, Sales, Expenses, or Tip." });
+      return res.status(400).json({ message: `Type must be one of: ${ENTRY_TYPES.join(", ")}.` });
     }
     existing.type = type;
   }

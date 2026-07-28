@@ -4,7 +4,7 @@ import { ReferenceOption } from "./models/ReferenceOption.js";
 import { Settings } from "./models/Settings.js";
 import {
   SALES_TAX_RATE,
-  TAX_EXEMPT_ENTRY_TYPES,
+  TAX_REVERSING_ENTRY_TYPES,
   PRODUCT_SERVICE_TYPES,
   ENTRY_STATUSES,
   PAYMENT_METHODS,
@@ -50,8 +50,12 @@ export function computeAmounts(income, expense, type = "", taxRate) {
   const safeIncome = Number.isFinite(income) ? income : 0;
   const safeExpense = Number.isFinite(expense) ? expense : 0;
   const rate = (Number.isFinite(taxRate) && taxRate >= 0 && taxRate <= 1) ? taxRate : SALES_TAX_RATE;
-  const taxExempt = TAX_EXEMPT_ENTRY_TYPES.includes(type);
-  const salesTax = taxExempt ? 0 : roundMoney(safeIncome * rate);
+  // A refund gives back money that came in as income with tax carved out of it,
+  // so the tax comes back out too: the refunded amount sits in `expense` and
+  // salesTax goes negative, cancelling what the original sale added.
+  const salesTax = TAX_REVERSING_ENTRY_TYPES.includes(type)
+    ? -roundMoney(safeExpense * rate)
+    : roundMoney(safeIncome * rate);
   const netProfit = roundMoney(safeIncome - safeExpense - salesTax);
 
   return {
@@ -95,6 +99,44 @@ export function normalizePhoneKey(value) {
     return digits.slice(1);
   }
   return digits;
+}
+
+// E.164 for US numbers, which is what every SMS provider expects. Returns "" if
+// the number isn't a plausible US 10-digit line, so callers can skip rather than
+// hand the carrier something it will reject and bill for.
+export function toE164US(value) {
+  const digits = String(value || "").replace(/\D+/g, "");
+  const national = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+  if (national.length !== 10) return "";
+  // US area codes and exchange codes never start with 0 or 1.
+  if (national[0] === "0" || national[0] === "1") return "";
+  if (national[3] === "0" || national[3] === "1") return "";
+  return `+1${national}`;
+}
+
+// Crockford-style base32 minus I, L, O and U: the customer reads this code back
+// over the phone, so it must not contain characters that are ambiguous when
+// spoken or written (I/1, O/0), and dropping U avoids accidental profanity.
+const WARRANTY_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const WARRANTY_CODE_LENGTH = 6;
+
+export function generateWarrantyNumber(randomInt = (max) => Math.floor(Math.random() * max)) {
+  let code = "";
+  for (let i = 0; i < WARRANTY_CODE_LENGTH; i += 1) {
+    code += WARRANTY_CODE_ALPHABET[randomInt(WARRANTY_CODE_ALPHABET.length)];
+  }
+  return code;
+}
+
+// Accepts what a customer might read back — lowercase, spaces, dashes, and the
+// classic O/0 and I/1 mix-ups — and returns the canonical stored form.
+export function normalizeWarrantyNumber(value) {
+  return String(value || "")
+    .toUpperCase()
+    .replace(/[^0-9A-Z]/g, "")
+    .replace(/O/g, "0")
+    .replace(/[IL]/g, "1")
+    .replace(/U/g, "V");
 }
 
 // Canonical Instagram handle: lowercase, no leading @, profile URLs unwrapped.

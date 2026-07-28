@@ -18,8 +18,9 @@ export function quarterOfDate(date) {
   return { year: d.getUTCFullYear(), quarter: quarterOfMonth(d.getUTCMonth()) };
 }
 
-// Sum of sales tax collected per quarter for a year. Tips carry salesTax = 0, so
-// summing salesTax across all entry types is already tax-exempt-correct.
+// Sum of sales tax collected per quarter for a year. Non-revenue types carry
+// salesTax = 0 and refunds carry it negative, so summing salesTax across all
+// entry types already nets refunds out of what's owed.
 async function collectedByQuarter(accountId, year) {
   const start = new Date(Date.UTC(year, 0, 1));
   const end = new Date(Date.UTC(year + 1, 0, 1));

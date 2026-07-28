@@ -3,6 +3,12 @@ import { Entry } from "../models/Entry.js";
 import { InventoryItem } from "../models/InventoryItem.js";
 import { InventoryTransaction } from "../models/InventoryTransaction.js";
 import { ReferenceOption } from "../models/ReferenceOption.js";
+import { Settings } from "../models/Settings.js";
+import {
+  isCompletionStatus,
+  sendWarrantySms,
+  warrantyWindow
+} from "../services/warrantySmsService.js";
 import {
   asyncHandler,
   parseMoneyInput,
@@ -15,6 +21,7 @@ import {
   resolveReferenceOption,
   normalizeInstagramHandle,
   normalizePhoneKey,
+  generateWarrantyNumber,
   normalizeOptionName,
   deriveCustomerName,
   findCustomerByContact,
@@ -93,6 +100,52 @@ function bodyHas(body, key) {
   return Object.prototype.hasOwnProperty.call(body || {}, key);
 }
 
+// Assigns the warranty code and window the first time a job reaches a finished
+// status. Deliberately independent of whether SMS is switched on: the code is
+// what the customer quotes when they call, so it has to exist even for accounts
+// that never text anyone.
+//
+// The code is only minted on completion, not at booking, so records that are
+// created and cancelled don't burn codes, and the warranty clock starts when
+// the work actually finished.
+async function assignWarrantyOnCompletion(accountId, entry, smsSettings) {
+  if (entry.warrantyNumber) return entry;
+  const types = smsSettings?.entryTypes?.length ? smsSettings.entryTypes : ["Repair"];
+  if (!types.includes(entry.type)) return entry;
+
+  const completedAt = new Date();
+  const { start, end } = warrantyWindow(completedAt, WARRANTY_DAYS);
+  entry.warrantyStartsAt = start;
+  entry.warrantyEndsAt = end;
+
+  // Codes are random, so a collision is possible if rare. Retry a few times
+  // rather than failing the customer's record save over it.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const candidate = generateWarrantyNumber();
+    const taken = await Entry.findOne({ accountId, warrantyNumber: candidate }).select("_id").lean();
+    if (!taken) {
+      entry.warrantyNumber = candidate;
+      return entry;
+    }
+  }
+  // Out of attempts: leave the code empty rather than block the save. The
+  // record still completes; the text is skipped and visible as such.
+  return entry;
+}
+
+// Fires the warranty text after a record is saved. Never throws and never
+// blocks the response on a carrier error — the record save is the user's
+// action, and a texting failure must not undo it.
+async function dispatchWarrantySms(accountId, entry) {
+  try {
+    const account = await Settings.findById(accountId).select("sms").lean();
+    if (!account?.sms?.enabled) return;
+    await sendWarrantySms(accountId, entry, account.sms);
+  } catch (error) {
+    console.error("Warranty SMS dispatch failed:", error);
+  }
+}
+
 // Validates the warranty-callback fields on create/update. Returns
 // { isWarrantyCallback, callbackOf, callbackReason, error }.
 async function resolveCallbackFields(accountId, body, { selfId = null, existing = null } = {}) {
@@ -133,6 +186,55 @@ async function resolveCallbackFields(accountId, body, { selfId = null, existing 
   }
 
   return { isWarrantyCallback, callbackOf, callbackReason, error: null };
+}
+
+// A Refund points at the record it hands money back for. The link is optional —
+// money refunded for work that predates the app has nothing to point at — but
+// when present it must be a real record of this account that actually took money
+// in, since you cannot refund an expense.
+async function resolveRefundOf(accountId, body, { type, selfId = null, existing = null } = {}) {
+  let refundOf = existing?.refundOf ? String(existing.refundOf) : null;
+
+  if (bodyHas(body, "refundOf")) {
+    const raw = body.refundOf === null ? "" : String(body.refundOf || "").trim();
+    if (!raw) {
+      refundOf = null;
+    } else {
+      if (!mongoose.Types.ObjectId.isValid(raw)) {
+        return { error: "Invalid refundOf entry id." };
+      }
+      if (selfId && raw === String(selfId)) {
+        return { error: "A refund cannot refund itself." };
+      }
+      const original = await Entry.findOne({ _id: raw, accountId }).lean();
+      if (!original) {
+        return { error: "Original entry for refundOf not found." };
+      }
+      if (!(original.income > 0)) {
+        return { error: "Only a record that took money in can be refunded." };
+      }
+      refundOf = raw;
+    }
+  }
+
+  // Retyping a refund into something else drops the link rather than leaving a
+  // Sales record claiming to reverse another entry.
+  if (type !== "Refund") {
+    refundOf = null;
+  }
+
+  return { refundOf, error: null };
+}
+
+// The rate to reverse on a refund. A linked original gives back exactly the tax
+// it charged — prorated when only part of the sale is refunded — which stays
+// correct even if the account's tax rate changed since. Unlinked refunds fall
+// back to the current rate.
+async function resolveRefundTaxRate(accountId, refundOf, fallbackRate) {
+  if (!refundOf) return fallbackRate;
+  const original = await Entry.findOne({ _id: refundOf, accountId }).select("income salesTax").lean();
+  if (!original || !(original.income > 0)) return fallbackRate;
+  return Math.min(1, Math.max(0, (original.salesTax || 0) / original.income));
 }
 
 async function normalizeInventoryUsage(accountId, input) {
@@ -234,6 +336,47 @@ async function assertInventoryUsageAvailable(accountId, previousUsage, nextUsage
   }
 }
 
+// Hydrates both ends of the refund link on a page of lean entries, so the table
+// can badge a refunded sale and a refund can name what it reversed without the
+// client hunting for records that may not even be on the same page.
+//
+// Two indexed queries per page rather than a stored counter on the original:
+// refunds are rare, and a denormalized total would have to be maintained on
+// every refund create, retype, relink and delete to avoid drifting.
+async function attachRefundLinks(accountId, entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return entries;
+
+  const SUMMARY_FIELDS = "date description productServiceName type income expense customerName";
+  const pageIds = entries.map((entry) => entry._id);
+  const originalIds = Array.from(
+    new Set(entries.map((entry) => entry.refundOf).filter(Boolean).map(String))
+  );
+
+  const [refunds, originals] = await Promise.all([
+    Entry.find({ accountId, refundOf: { $in: pageIds } }).select(`${SUMMARY_FIELDS} refundOf`).lean(),
+    originalIds.length
+      ? Entry.find({ accountId, _id: { $in: originalIds } }).select(SUMMARY_FIELDS).lean()
+      : []
+  ]);
+
+  const refundsByOriginal = new Map();
+  for (const refund of refunds) {
+    const key = String(refund.refundOf);
+    if (!refundsByOriginal.has(key)) refundsByOriginal.set(key, []);
+    refundsByOriginal.get(key).push(refund);
+  }
+  const originalsById = new Map(originals.map((original) => [String(original._id), original]));
+
+  for (const entry of entries) {
+    const linked = refundsByOriginal.get(String(entry._id)) || [];
+    entry.refunds = linked;
+    entry.refundedTotal = roundMoney(linked.reduce((sum, refund) => sum + (refund.expense || 0), 0));
+    entry.refundOfEntry = entry.refundOf ? originalsById.get(String(entry.refundOf)) || null : null;
+  }
+
+  return entries;
+}
+
 export const list = asyncHandler(async (req, res) => {
   const { type, status, page, limit, search, callbacks } = req.query;
   const query = { accountId: req.accountId };
@@ -250,7 +393,7 @@ export const list = asyncHandler(async (req, res) => {
   if (type) {
     const typeFilter = String(type);
     if (!ENTRY_TYPES.includes(typeFilter)) {
-      return res.status(400).json({ message: "Type filter must be Repair, Sales, Expenses, or Tip." });
+      return res.status(400).json({ message: `Type filter must be one of: ${ENTRY_TYPES.join(", ")}.` });
     }
     query.type = typeFilter;
   }
@@ -283,7 +426,7 @@ export const list = asyncHandler(async (req, res) => {
   const hasPagination = page !== undefined || limit !== undefined;
   if (!hasPagination) {
     const entries = await Entry.find(query).sort({ date: -1, createdAt: -1 }).lean();
-    return res.json(entries);
+    return res.json(await attachRefundLinks(req.accountId, entries));
   }
 
   const parsedPage = parsePaginationValue(page, 1);
@@ -304,7 +447,7 @@ export const list = asyncHandler(async (req, res) => {
 
   const totalPages = Math.max(1, Math.ceil(total / cappedLimit));
   return res.json({
-    items: entries,
+    items: await attachRefundLinks(req.accountId, entries),
     pagination: {
       page: parsedPage,
       limit: cappedLimit,
@@ -468,6 +611,78 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
   return res.json({ windowDays: parsedWindow, customerOptionId: optionId, candidates });
 });
 
+// GET /api/entries/refund-candidates
+// Records a refund can point at: anything that actually took money in. Scoped
+// to one customer when contact details are known (refunding the person in front
+// of you), otherwise the most recent money-in records, searchable by hand for
+// the case where the refund is booked without customer details.
+export const refundCandidates = asyncHandler(async (req, res) => {
+  const { customerOptionId, phone, instagram, search, excludeId, limit } = req.query;
+
+  const parsedLimit = limit !== undefined ? Number(limit) : 20;
+  if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
+    return res.status(400).json({ message: "limit must be an integer between 1 and 100." });
+  }
+
+  const query = { accountId: req.accountId, income: { $gt: 0 } };
+
+  let optionId = String(customerOptionId || "").trim();
+  if (optionId && !mongoose.Types.ObjectId.isValid(optionId)) {
+    return res.status(400).json({ message: "Invalid customerOptionId." });
+  }
+  if (!optionId) {
+    const cleanPhone = String(phone || "").trim();
+    const cleanInstagram = normalizeInstagramHandle(instagram);
+    if (cleanPhone || cleanInstagram) {
+      const match = await findCustomerByContact(req.accountId, cleanPhone, cleanInstagram);
+      optionId = match ? String(match._id) : "";
+    }
+  }
+  if (optionId) {
+    query.customerOptionId = optionId;
+  }
+
+  const searchText = String(search || "").trim();
+  if (searchText) {
+    const searchRegex = new RegExp(searchText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    query.$or = [
+      { description: searchRegex },
+      { productServiceName: searchRegex },
+      { customerName: searchRegex },
+      { notes: searchRegex }
+    ];
+  }
+
+  const cleanExcludeId = String(excludeId || "").trim();
+  if (cleanExcludeId && mongoose.Types.ObjectId.isValid(cleanExcludeId)) {
+    query._id = { $ne: cleanExcludeId };
+  }
+
+  const candidates = await Entry.find(query)
+    .sort({ date: -1, createdAt: -1 })
+    .limit(parsedLimit)
+    .select("date type description productServiceName income salesTax status customerName")
+    .lean();
+
+  // How much of each has already been handed back, so a partial refund can be
+  // topped up without refunding the same job twice over by accident.
+  const refunds = await Entry.find({
+    accountId: req.accountId,
+    refundOf: { $in: candidates.map((candidate) => candidate._id) }
+  }).select("refundOf expense").lean();
+
+  const refundedByOriginal = new Map();
+  for (const refund of refunds) {
+    const key = String(refund.refundOf);
+    refundedByOriginal.set(key, roundMoney((refundedByOriginal.get(key) || 0) + (refund.expense || 0)));
+  }
+  for (const candidate of candidates) {
+    candidate.refundedTotal = refundedByOriginal.get(String(candidate._id)) || 0;
+  }
+
+  return res.json({ customerOptionId: optionId || null, candidates });
+});
+
 // GET /api/entries/callback-stats
 // Meters warranty callbacks over a date range: rate, cost eaten, time to
 // failure, and which repair types generate them.
@@ -592,7 +807,7 @@ export const create = asyncHandler(async (req, res) => {
   const type = String(body.type || "");
 
   if (!ENTRY_TYPES.includes(type)) {
-    return res.status(400).json({ message: "Type must be Repair, Sales, Expenses, or Tip." });
+    return res.status(400).json({ message: `Type must be one of: ${ENTRY_TYPES.join(", ")}.` });
   }
 
   const date = new Date(body.date);
@@ -733,18 +948,37 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Description is required when no product/service is selected." });
   }
 
+  const refund = await resolveRefundOf(req.accountId, body, { type });
+  if (refund.error) {
+    return res.status(400).json({ message: refund.error });
+  }
+
   const rawTaxRate = body.taxRate !== undefined ? Number(body.taxRate) : undefined;
+  const taxRate = await resolveRefundTaxRate(req.accountId, refund.refundOf, rawTaxRate);
   const expense = roundMoney(manualExpense + inventory.inventoryCost);
-  const amounts = computeAmounts(income, expense, type, rawTaxRate);
+  const amounts = computeAmounts(income, expense, type, taxRate);
   await assertInventoryUsageAvailable(req.accountId, [], inventory.usage);
 
   let entry;
+  // A record can be booked straight to Completed/Paid (walk-in paid on the
+  // spot), so the warranty has to be assigned here too, not only on update.
+  const account = await Settings.findById(req.accountId).select("sms").lean();
+  const warranty = { warrantyNumber: "", warrantyStartsAt: null, warrantyEndsAt: null };
+  if (isCompletionStatus(status)) {
+    const draft = { type, warrantyNumber: "" };
+    await assignWarrantyOnCompletion(req.accountId, draft, account?.sms);
+    warranty.warrantyNumber = draft.warrantyNumber;
+    warranty.warrantyStartsAt = draft.warrantyStartsAt || null;
+    warranty.warrantyEndsAt = draft.warrantyEndsAt || null;
+  }
+
   await withTransaction(async (session) => {
     [entry] = await Entry.create([{
     accountId: req.accountId,
     date,
     type,
     description,
+    ...warranty,
     customerName,
     customerPhone,
     customerInstagram,
@@ -765,10 +999,15 @@ export const create = asyncHandler(async (req, res) => {
     isWarrantyCallback: callback.isWarrantyCallback,
     callbackOf: callback.callbackOf,
     callbackReason: callback.callbackReason,
+    refundOf: refund.refundOf,
     status
     }], { session });
     await reconcileInventoryUsage(req.accountId, [], inventory.usage, `Used on record ${entry._id}`, session);
   });
+
+  if (isCompletionStatus(status)) {
+    await dispatchWarrantySms(req.accountId, entry);
+  }
 
   return res.status(201).json(entry);
 });
@@ -784,9 +1023,14 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "Entry not found." });
   }
 
+  // Captured before the document is mutated below: this is the only point at
+  // which the pre-update status is still readable, and it decides whether this
+  // save is the transition that starts the warranty.
+  const wasComplete = isCompletionStatus(existing.status);
+
   const type = req.body.type ? String(req.body.type) : existing.type;
   if (!ENTRY_TYPES.includes(type)) {
-    return res.status(400).json({ message: "Type must be Repair, Sales, Expenses, or Tip." });
+    return res.status(400).json({ message: `Type must be one of: ${ENTRY_TYPES.join(", ")}.` });
   }
 
   const date = req.body.date ? new Date(req.body.date) : existing.date;
@@ -1039,9 +1283,15 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Description is required when no product/service is selected." });
   }
 
+  const refund = await resolveRefundOf(req.accountId, req.body, { type, selfId: entryId, existing });
+  if (refund.error) {
+    return res.status(400).json({ message: refund.error });
+  }
+
   const rawTaxRate = req.body.taxRate !== undefined ? Number(req.body.taxRate) : undefined;
+  const taxRate = await resolveRefundTaxRate(req.accountId, refund.refundOf, rawTaxRate);
   const expense = roundMoney(manualExpense + inventory.inventoryCost);
-  const amounts = computeAmounts(income, expense, type, rawTaxRate);
+  const amounts = computeAmounts(income, expense, type, taxRate);
   const previousUsage = existing.inventoryUsage ? existing.inventoryUsage.map((item) => item.toObject ? item.toObject() : item) : [];
   await assertInventoryUsageAvailable(req.accountId, previousUsage, inventory.usage);
 
@@ -1059,6 +1309,7 @@ export const update = asyncHandler(async (req, res) => {
   existing.customerAddress = customerAddress;
   existing.customerReference = customerReferenceLabel;
   existing.customerOptionId = customerOptionId;
+  existing.refundOf = refund.refundOf;
   existing.productServiceName = productServiceName;
   existing.productServiceType = productServiceType;
   existing.productServicePrice = productServicePrice;
@@ -1073,6 +1324,16 @@ export const update = asyncHandler(async (req, res) => {
   existing.callbackOf = callback.callbackOf;
   existing.callbackReason = callback.callbackReason;
 
+  const nowComplete = isCompletionStatus(existing.status);
+  const account = await Settings.findById(req.accountId).select("sms").lean();
+  if (nowComplete) {
+    // Runs on any save while complete, not just the transition, so a record
+    // that was completed before this feature existed picks up a warranty code
+    // the next time it is touched. assignWarrantyOnCompletion is a no-op once
+    // a code exists, so the number and dates never move.
+    await assignWarrantyOnCompletion(req.accountId, existing, account?.sms);
+  }
+
   await withTransaction(async (session) => {
     existing.$session(session);
     await existing.save({ session });
@@ -1084,6 +1345,14 @@ export const update = asyncHandler(async (req, res) => {
       session
     );
   });
+
+  // Only the crossing into a finished status texts the customer. Later edits to
+  // an already-complete record must stay silent; the SmsMessage unique index is
+  // the backstop if this condition is ever wrong.
+  if (nowComplete && !wasComplete) {
+    await dispatchWarrantySms(req.accountId, existing);
+  }
+
   return res.json(existing);
 });
 
@@ -1103,6 +1372,14 @@ export const remove = asyncHandler(async (req, res) => {
         [],
         `Deleted record ${deleted._id}`,
         session
+      );
+      // Any refund that pointed at this record would otherwise reference a
+      // record that no longer exists. The refund itself stays — the money did
+      // leave — it just loses the link.
+      await Entry.updateMany(
+        { accountId: req.accountId, refundOf: deleted._id },
+        { $set: { refundOf: null } },
+        { session }
       );
     }
   });

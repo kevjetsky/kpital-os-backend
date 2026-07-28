@@ -10,7 +10,7 @@ const entrySchema = new mongoose.Schema(
     type: {
       type: String,
       required: true,
-      enum: ["Repair", "Sales", "Expenses", "Tip"]
+      enum: ["Sales", "Repair", "Expenses", "Refund", "Payroll"]
     },
     description: { type: String, default: "", trim: true },
     income: { type: Number, required: true, default: 0 },
@@ -51,6 +51,19 @@ const entrySchema = new mongoose.Schema(
     isWarrantyCallback: { type: Boolean, default: false },
     callbackOf: { type: mongoose.Schema.Types.ObjectId, ref: "Entry", default: null },
     callbackReason: { type: String, default: "", trim: true },
+    // Refund: this record hands money back for an earlier sale or repair.
+    // refundOf points at that original so the original can show it was refunded
+    // and the tax reversal can use the rate the original actually charged. Null
+    // on every non-Refund record, and on refunds of work that predates the app.
+    refundOf: { type: mongoose.Schema.Types.ObjectId, ref: "Entry", default: null },
+    // Short code the customer is given so they can quote it when they call
+    // about a warranty. Assigned on eligible records only, so it is empty on
+    // expense lines and on every record that predates this feature.
+    warrantyNumber: { type: String, default: "", trim: true, uppercase: true },
+    // Warranty clock. Set when the job is completed, not when it is booked, so
+    // a record that sits Pending on the bench for a week does not burn warranty.
+    warrantyStartsAt: { type: Date, default: null },
+    warrantyEndsAt: { type: Date, default: null },
     // How this record was (or will be) paid. Must be set once the record is Paid.
     paymentMethod: { type: String, default: "", trim: true },
     payments: [
@@ -80,6 +93,17 @@ entrySchema.index({ accountId: 1, date: -1, createdAt: -1 });
 entrySchema.index({ accountId: 1, type: 1, status: 1, date: -1 });
 entrySchema.index({ accountId: 1, customerOptionId: 1, type: 1, date: -1 });
 entrySchema.index({ accountId: 1, isWarrantyCallback: 1, date: -1 });
+// Every listed entry asks "was this refunded?", which is a lookup by the refund's
+// refundOf pointer. Sparse: only refunds carry a non-null value.
+entrySchema.index({ accountId: 1, refundOf: 1 }, { sparse: true });
+// Warranty codes are quoted back by customers, so lookup must be indexed — and
+// unique per account, since two live records sharing a code would make "which
+// job is this?" unanswerable. Partial so the empty default doesn't collide
+// across every legacy record.
+entrySchema.index(
+  { accountId: 1, warrantyNumber: 1 },
+  { unique: true, partialFilterExpression: { warrantyNumber: { $gt: "" } } }
+);
 
 tenantGuard(entrySchema, { modelName: "Entry" });
 

@@ -28,6 +28,28 @@ const settingsSchema = new mongoose.Schema(
     notificationState: {
       lastWeeklySummaryAt: { type: Date, default: null },
       lastQuarterlyTaxPeriod: { type: String, default: "" } // e.g. "2026-Q2"
+    },
+    // Customer-facing warranty SMS. Off by default and dry-run by default:
+    // turning this on starts sending real texts to real customers, so it must
+    // be a deliberate act, never a side effect of deploying.
+    sms: {
+      enabled: { type: Boolean, default: false },
+      // dryRun renders and logs the message without handing it to a carrier.
+      dryRun: { type: Boolean, default: true },
+      provider: { type: String, enum: ["telnyx", "twilio", "noop"], default: "noop" },
+      fromNumber: { type: String, default: "", trim: true },
+      // Which record types get a warranty text. Repair only by default, since
+      // that is what the warranty window actually covers.
+      entryTypes: { type: [String], default: ["Repair"] },
+      businessName: { type: String, default: "", trim: true },
+      // Number printed in the text for the customer to call back.
+      callbackPhone: { type: String, default: "", trim: true },
+      reviewUrl: { type: String, default: "", trim: true },
+      template: {
+        type: String,
+        default:
+          "{business}: Repair #{warranty} done. {days}-day warranty thru {expires}. Issues? Call {phone}. Happy? Review: {review} Reply STOP to end"
+      }
     }
   },
   { timestamps: true }

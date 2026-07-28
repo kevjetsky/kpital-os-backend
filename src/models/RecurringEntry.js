@@ -14,7 +14,7 @@ const recurringEntrySchema = new mongoose.Schema(
     type: {
       type: String,
       required: true,
-      enum: ["Repair", "Sales", "Expenses", "Tip"]
+      enum: ["Sales", "Repair", "Expenses", "Refund", "Payroll"]
     },
     description: { type: String, default: "", trim: true },
     income: { type: Number, required: true, default: 0 },
