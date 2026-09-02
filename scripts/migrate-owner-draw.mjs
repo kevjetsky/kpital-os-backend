@@ -23,6 +23,14 @@ const TO_TYPE = "Owner Draw";
 // loose match: "Owner withdrawal", "owner withdrawal - Aug", etc.
 const DESCRIPTION_MATCH = /owner withdrawal/i;
 
+// Draws that were logged under different wording and so cannot be matched on
+// description. Listed by id, confirmed one at a time with the owner, rather
+// than loosening DESCRIPTION_MATCH — a broader pattern would sweep up real
+// wages, which must stay Payroll.
+//
+//   6a6a011e7c86273de1eb3ca0  2026-07-29  $1000.00  "To Kevin Gonzalez"
+const ALSO_CONVERT_IDS = ["6a6a011e7c86273de1eb3ca0"];
+
 const DRY_RUN = ["1", "true", "yes"].includes(String(process.env.DRY_RUN || "").toLowerCase());
 
 const money = (n) => `$${Number(n || 0).toFixed(2)}`;
@@ -91,7 +99,10 @@ async function main() {
   await mongoose.connect(uri, { serverSelectionTimeoutMS: 10000 });
   console.log("Connected.%s", DRY_RUN ? " DRY RUN — nothing will be written." : "");
 
-  const filter = { type: FROM_TYPE, description: DESCRIPTION_MATCH };
+  const filter = {
+    type: FROM_TYPE,
+    $or: [{ description: DESCRIPTION_MATCH }, { _id: { $in: ALSO_CONVERT_IDS } }]
+  };
   const candidates = await Entry.find(filter)
     .setOptions(ALL_ACCOUNTS)
     .sort({ date: 1 })
@@ -115,7 +126,12 @@ async function main() {
     printEntries(already);
   }
 
-  console.log("\nTo convert: %d entries matching type %j + /owner withdrawal/i", candidates.length, FROM_TYPE);
+  console.log(
+    "\nTo convert: %d entries — type %j matching /owner withdrawal/i, plus %d listed by id",
+    candidates.length,
+    FROM_TYPE,
+    ALSO_CONVERT_IDS.length
+  );
   printEntries(candidates);
 
   const drawTotal = candidates.reduce((sum, row) => sum + (row.expense || 0), 0);
