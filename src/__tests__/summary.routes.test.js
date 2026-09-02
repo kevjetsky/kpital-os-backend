@@ -86,6 +86,40 @@ describe("GET /api/entries/summary", () => {
     });
   });
 
+  it("reports owner draws on their own line, outside expense and profit", async () => {
+    await Entry.insertMany([
+      entry(accountA, "2026-06-10", { income: 1000, expense: 100, salesTax: 82.5, netProfit: 817.5 }),
+      // A draw as it is now stored: real cash out, netProfit pinned to 0.
+      entry(accountA, "2026-06-22", {
+        type: "Owner Draw",
+        description: "Owner withdrawal",
+        income: 0,
+        expense: 300,
+        salesTax: 0,
+        netProfit: 0
+      })
+    ]);
+
+    const res = await get("?from=2026-06-01&to=2026-06-30");
+
+    expect(res.status).toBe(200);
+    // The draw is not a business cost, so it stays out of Expense entirely...
+    expect(res.body.range.expense).toBe(100);
+    // ...and out of profit, which is the bug this type was added to fix.
+    expect(res.body.range.net).toBe(817.5);
+    // But it is still reported, so cash out reconciles.
+    expect(res.body.range.ownerDraws).toBe(300);
+    expect(res.body.range.count).toBe(2);
+  });
+
+  it("reports zero owner draws for a period with none", async () => {
+    await Entry.insertMany([entry(accountA, "2026-06-10")]);
+
+    const res = await get("?from=2026-06-01&to=2026-06-30");
+
+    expect(res.body.range.ownerDraws).toBe(0);
+  });
+
   it("includes records on both the first and last day of the range", async () => {
     await Entry.insertMany([
       entry(accountA, "2026-05-31", { income: 1 }), // just outside

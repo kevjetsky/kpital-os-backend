@@ -2,6 +2,7 @@ import { Entry } from "../models/Entry.js";
 import { InventoryItem } from "../models/InventoryItem.js";
 import { PushSubscription } from "../models/PushSubscription.js";
 import { Settings } from "../models/Settings.js";
+import { PROFIT_NEUTRAL_ENTRY_TYPES } from "../constants.js";
 import { roundMoney, toAccountObjectId } from "../utils.js";
 import { sendToAccount } from "./notificationService.js";
 import { getQuarterOwed, periodLabel, quarterOfDate } from "./taxService.js";
@@ -97,7 +98,14 @@ async function runWeeklySummary(accountId, settings, prefs, now, results) {
       $group: {
         _id: null,
         income: { $sum: "$income" },
-        expense: { $sum: "$expense" },
+        // Owner draws are reported on their own line: they are cash out, but
+        // folding them into "out" would make the net look wrong against it.
+        expense: {
+          $sum: { $cond: [{ $in: ["$type", PROFIT_NEUTRAL_ENTRY_TYPES] }, 0, "$expense"] }
+        },
+        ownerDraws: {
+          $sum: { $cond: [{ $in: ["$type", PROFIT_NEUTRAL_ENTRY_TYPES] }, "$expense", 0] }
+        },
         netProfit: { $sum: "$netProfit" },
         count: { $sum: 1 }
       }
@@ -106,10 +114,14 @@ async function runWeeklySummary(accountId, settings, prefs, now, results) {
 
   const income = roundMoney(agg?.income || 0);
   const expense = roundMoney(agg?.expense || 0);
+  const ownerDraws = roundMoney(agg?.ownerDraws || 0);
   const netProfit = roundMoney(agg?.netProfit || 0);
-  const body = `Last 7 days: ${money(income)} in, ${money(expense)} out, net ${money(netProfit)} (${agg?.count || 0} entries).`;
+  // The draws clause is appended only when there were any, so a quiet week keeps
+  // the notification to one line on the lock screen.
+  const drawsPart = ownerDraws > 0 ? `, draws ${money(ownerDraws)}` : "";
+  const body = `Last 7 days: ${money(income)} in, ${money(expense)} out, net ${money(netProfit)}${drawsPart} (${agg?.count || 0} entries).`;
   const push = await sendToAccount(accountId, { title: "Weekly summary", body, url: "/", tag: "weekly-summary" });
-  results.weeklySummary = { income, expense, netProfit, count: agg?.count || 0, push };
+  results.weeklySummary = { income, expense, ownerDraws, netProfit, count: agg?.count || 0, push };
 
   settings.notificationState = settings.notificationState || {};
   settings.notificationState.lastWeeklySummaryAt = now;

@@ -49,6 +49,22 @@ describe("computeAmounts", () => {
     expect(result.salesTax).toBe(0);
     expect(result.netProfit).toBe(-500);
   });
+  it("leaves profit untouched on an Owner Draw: the cash leaves, the P&L does not move", () => {
+    const result = computeAmounts(0, 650, "Owner Draw");
+    // The money really is gone from the account...
+    expect(result.expense).toBe(650);
+    // ...but a member distribution is not a deductible business expense, so it
+    // must not read as a loss. This is the whole reason the type exists.
+    expect(result.netProfit).toBe(0);
+    expect(result.salesTax).toBe(0);
+  });
+  it("distinguishes an Owner Draw from the Payroll it used to be logged as", () => {
+    const asPayroll = computeAmounts(0, 300, "Payroll");
+    const asDraw = computeAmounts(0, 300, "Owner Draw");
+    expect(asPayroll.expense).toBe(asDraw.expense);
+    expect(asPayroll.netProfit).toBe(-300);
+    expect(asDraw.netProfit).toBe(0);
+  });
 });
 
 describe("parseMoneyInput", () => {

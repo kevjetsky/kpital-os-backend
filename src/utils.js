@@ -5,6 +5,7 @@ import { Settings } from "./models/Settings.js";
 import {
   SALES_TAX_RATE,
   TAX_REVERSING_ENTRY_TYPES,
+  PROFIT_NEUTRAL_ENTRY_TYPES,
   PRODUCT_SERVICE_TYPES,
   ENTRY_STATUSES,
   PAYMENT_METHODS,
@@ -50,6 +51,20 @@ export function computeAmounts(income, expense, type = "", taxRate) {
   const safeIncome = Number.isFinite(income) ? income : 0;
   const safeExpense = Number.isFinite(expense) ? expense : 0;
   const rate = (Number.isFinite(taxRate) && taxRate >= 0 && taxRate <= 1) ? taxRate : SALES_TAX_RATE;
+
+  // An Owner Draw is a capital distribution, not an expense the business can
+  // deduct: the money leaves the account (it keeps its `expense` amount) but it
+  // must not reduce profit, so netProfit is pinned to 0 rather than derived.
+  // No revenue was booked either, so there is no sales tax on it.
+  if (PROFIT_NEUTRAL_ENTRY_TYPES.includes(type)) {
+    return {
+      income: roundMoney(safeIncome),
+      expense: roundMoney(safeExpense),
+      salesTax: 0,
+      netProfit: 0
+    };
+  }
+
   // A refund gives back money that came in as income with tax carved out of it,
   // so the tax comes back out too: the refunded amount sits in `expense` and
   // salesTax goes negative, cancelling what the original sale added.

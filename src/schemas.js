@@ -36,7 +36,7 @@ export const resetPasswordSchema = z.object({
 });
 
 export const createEntrySchema = z.object({
-  type: z.enum(["Sales", "Repair", "Expenses", "Refund", "Payroll"]),
+  type: z.enum(["Sales", "Repair", "Expenses", "Refund", "Payroll", "Owner Draw"]),
   date: z.string().min(1),
   description: z.string().optional().default(""),
   income: z.number().min(0).optional().default(0),

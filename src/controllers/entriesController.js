@@ -34,6 +34,7 @@ import {
   EXPENSE_CATEGORIES,
   PAYMENT_METHODS,
   CUSTOMER_REQUIRED_ENTRY_TYPES,
+  PROFIT_NEUTRAL_ENTRY_TYPES,
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
   WARRANTY_DAYS
@@ -506,7 +507,15 @@ export const summary = asyncHandler(async (req, res) => {
         $group: {
           _id: null,
           income: { $sum: "$income" },
-          expense: { $sum: "$expense" },
+          // Owner draws are cash out but not a business expense, so they are
+          // split into their own total instead of inflating this one. They
+          // already carry netProfit: 0, so `net` needs no special handling.
+          expense: {
+            $sum: { $cond: [{ $in: ["$type", PROFIT_NEUTRAL_ENTRY_TYPES] }, 0, "$expense"] }
+          },
+          ownerDraws: {
+            $sum: { $cond: [{ $in: ["$type", PROFIT_NEUTRAL_ENTRY_TYPES] }, "$expense", 0] }
+          },
           salesTax: { $sum: "$salesTax" },
           net: { $sum: "$netProfit" },
           count: { $sum: 1 }
@@ -539,6 +548,7 @@ export const summary = asyncHandler(async (req, res) => {
       to: rangeEnd.toISOString(),
       income: roundMoney(totals.income || 0),
       expense: roundMoney(totals.expense || 0),
+      ownerDraws: roundMoney(totals.ownerDraws || 0),
       salesTax: roundMoney(totals.salesTax || 0),
       net: roundMoney(totals.net || 0),
       count: totals.count || 0
@@ -736,7 +746,11 @@ export const callbackStats = asyncHandler(async (req, res) => {
 
   for (const cb of callbacks) {
     partsCost = roundMoney(partsCost + (cb.inventoryCost || 0));
-    totalExpense = roundMoney(totalExpense + (cb.expense || 0));
+    // Guard rather than assumption: a draw is never rework, but this figure is
+    // "what callbacks cost the business", which a capital distribution is not.
+    if (!PROFIT_NEUTRAL_ENTRY_TYPES.includes(cb.type)) {
+      totalExpense = roundMoney(totalExpense + (cb.expense || 0));
+    }
 
     const original = cb.callbackOf ? originalsById.get(String(cb.callbackOf)) : null;
     // Group by the original job's repair type when linked; otherwise fall back
@@ -824,6 +838,7 @@ export const create = asyncHandler(async (req, res) => {
   const notes = String(body.notes || "").trim();
   const rawCategory = String(body.category || "").trim();
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
+  const suppressSms = Boolean(body.suppressSms);
 
   const callback = await resolveCallbackFields(req.accountId, body);
   if (callback.error) {
@@ -979,6 +994,7 @@ export const create = asyncHandler(async (req, res) => {
     type,
     description,
     ...warranty,
+    suppressSms,
     customerName,
     customerPhone,
     customerInstagram,
@@ -1077,6 +1093,9 @@ export const update = asyncHandler(async (req, res) => {
   const notes = req.body.notes !== undefined ? String(req.body.notes).trim() : existing.notes;
   const rawCategory = req.body.category !== undefined ? String(req.body.category || "").trim() : (existing.category || "");
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
+  const suppressSms = bodyHas(req.body, "suppressSms")
+    ? Boolean(req.body.suppressSms)
+    : !!existing.suppressSms;
 
   const callback = await resolveCallbackFields(req.accountId, req.body, { selfId: entryId, existing });
   if (callback.error) {
@@ -1323,6 +1342,9 @@ export const update = asyncHandler(async (req, res) => {
   existing.isWarrantyCallback = callback.isWarrantyCallback;
   existing.callbackOf = callback.callbackOf;
   existing.callbackReason = callback.callbackReason;
+  // Applied before the dispatch below, so unticking the box on the same save
+  // that completes the job lets the text go out.
+  existing.suppressSms = suppressSms;
 
   const nowComplete = isCompletionStatus(existing.status);
   const account = await Settings.findById(req.accountId).select("sms").lean();
