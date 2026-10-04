@@ -26,7 +26,17 @@ const smsMessageSchema = new mongoose.Schema(
     // Why we didn't send. Empty for successful sends.
     skipReason: {
       type: String,
-      enum: ["", "no-phone", "unparseable-phone", "opted-out", "disabled", "not-configured", "ineligible-type"],
+      enum: [
+        "",
+        "no-phone",
+        "unparseable-phone",
+        "opted-out",
+        "disabled",
+        "not-configured",
+        "ineligible-type",
+        // The owner ticked "Don't text the customer" on the record itself.
+        "suppressed"
+      ],
       default: ""
     },
     toNumber: { type: String, default: "", trim: true },

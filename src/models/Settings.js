@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { DEFAULT_WARRANTY_SMS_TEMPLATE } from "../constants.js";
 
 const settingsSchema = new mongoose.Schema(
   {
@@ -45,11 +46,7 @@ const settingsSchema = new mongoose.Schema(
       // Number printed in the text for the customer to call back.
       callbackPhone: { type: String, default: "", trim: true },
       reviewUrl: { type: String, default: "", trim: true },
-      template: {
-        type: String,
-        default:
-          "{business}: Repair #{warranty} done. {days}-day warranty thru {expires}. Issues? Call {phone}. Happy? Review: {review} Reply STOP to end"
-      }
+      template: { type: String, default: DEFAULT_WARRANTY_SMS_TEMPLATE }
     }
   },
   { timestamps: true }

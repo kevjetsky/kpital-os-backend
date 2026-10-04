@@ -194,6 +194,75 @@ describe("warranty text trigger", () => {
   });
 });
 
+// The "Don't text the customer" tick on the record form. Distinct from an
+// opt-out, which is the customer's decision and applies to every future job.
+describe("per-record suppression", () => {
+  it("does not text a walk-in created Paid with the box ticked", async () => {
+    const res = await authed(request(app).post("/api/entries")).send(
+      newRepair({ status: "Paid", suppressSms: true })
+    );
+
+    expect(res.status).toBe(201);
+    expect(res.body.suppressSms).toBe(true);
+    // The warranty code is still minted: the customer is told it in person, and
+    // the code is what they quote when they call.
+    expect(res.body.warrantyNumber).toMatch(/^[0-9A-Z]{6}$/);
+
+    const logs = await logsFor(res.body._id);
+    expect(logs).toHaveLength(1);
+    expect(logs[0].status).toBe("skipped");
+    expect(logs[0].skipReason).toBe("suppressed");
+  });
+
+  it("still honours the tick when the job completes on a later save", async () => {
+    const created = await authed(request(app).post("/api/entries")).send(
+      newRepair({ suppressSms: true })
+    );
+    await authed(request(app).put(`/api/entries/${created.body._id}`)).send({ status: "Completed" });
+
+    const logs = await logsFor(created.body._id);
+    expect(logs[0].skipReason).toBe("suppressed");
+  });
+
+  it("leaves the tick alone on an edit that does not mention it", async () => {
+    const created = await authed(request(app).post("/api/entries")).send(
+      newRepair({ suppressSms: true })
+    );
+    const res = await authed(request(app).put(`/api/entries/${created.body._id}`)).send({
+      notes: "waiting on part"
+    });
+
+    expect(res.body.suppressSms).toBe(true);
+  });
+
+  it("sends when the box is unticked on the same save that completes the job", async () => {
+    const created = await authed(request(app).post("/api/entries")).send(
+      newRepair({ suppressSms: true })
+    );
+    await authed(request(app).put(`/api/entries/${created.body._id}`)).send({
+      status: "Completed",
+      suppressSms: false
+    });
+
+    const logs = await logsFor(created.body._id);
+    expect(logs).toHaveLength(1);
+    expect(logs[0].status).toBe("dry-run");
+  });
+
+  it("lets an explicit resend override the tick", async () => {
+    const created = await authed(request(app).post("/api/entries")).send(
+      newRepair({ status: "Paid", suppressSms: true })
+    );
+    const res = await authed(request(app).post(`/api/entries/${created.body._id}/sms/resend`)).send();
+
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe("dry-run");
+    const logs = await logsFor(created.body._id);
+    expect(logs).toHaveLength(1);
+    expect(logs[0].status).toBe("dry-run");
+  });
+});
+
 describe("warranty number assignment", () => {
   it("assigns a code and a 40-day window on completion", async () => {
     const created = await authed(request(app).post("/api/entries")).send(newRepair());

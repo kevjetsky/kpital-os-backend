@@ -4,7 +4,7 @@ import { Entry } from "../models/Entry.js";
 import { SmsMessage } from "../models/SmsMessage.js";
 import { SmsOptOut } from "../models/SmsOptOut.js";
 import { asyncHandler, normalizePhoneKey, toE164US } from "../utils.js";
-import { ENTRY_TYPES, WARRANTY_DAYS } from "../constants.js";
+import { DEFAULT_WARRANTY_SMS_TEMPLATE, ENTRY_TYPES, WARRANTY_DAYS } from "../constants.js";
 import { isProviderConfigured } from "../services/smsService.js";
 import {
   buildWarrantyMessage,
@@ -33,7 +33,10 @@ function publicSmsSettings(sms = {}) {
     // Whether carrier credentials exist in the environment. Never the values —
     // this endpoint is only here so the UI can warn before a live send fails.
     providerConfigured: isProviderConfigured(sms.provider || "noop"),
-    warrantyDays: WARRANTY_DAYS
+    warrantyDays: WARRANTY_DAYS,
+    // Sent so the settings screen can offer "use the default message" without
+    // keeping a second copy of the wording that can drift from this one.
+    defaultTemplate: DEFAULT_WARRANTY_SMS_TEMPLATE
   };
 }
 
@@ -165,7 +168,11 @@ export const resend = asyncHandler(async (req, res) => {
   }
 
   await clearWarrantyAttempt(req.accountId, entryId);
-  const result = await sendWarrantySms(req.accountId, entry, account.sms);
+  // Resend is an explicit owner action, so it overrides the record's own
+  // "don't text the customer" tick rather than silently doing nothing.
+  const result = await sendWarrantySms(req.accountId, entry, account.sms, {
+    ignoreSuppression: true
+  });
   return res.json(result);
 });
 

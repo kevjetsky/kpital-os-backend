@@ -66,7 +66,12 @@ export function buildWarrantyMessage(entry, smsSettings, { days = WARRANTY_DAYS 
  * Decides whether an entry should get a warranty text, without sending.
  * Returns { eligible, reason } where reason is an SmsMessage.skipReason.
  */
-export function evaluateEligibility(entry, smsSettings) {
+export function evaluateEligibility(entry, smsSettings, { ignoreSuppression = false } = {}) {
+  // Checked first: the owner ticking the box on the record is the most specific
+  // answer to "why didn't this customer get a text?", so it should be the
+  // reason that gets logged even when something else would also have stopped it.
+  if (entry.suppressSms && !ignoreSuppression) return { eligible: false, reason: "suppressed" };
+
   if (!smsSettings?.enabled) return { eligible: false, reason: "disabled" };
 
   const types = smsSettings.entryTypes?.length ? smsSettings.entryTypes : ["Repair"];
@@ -98,7 +103,12 @@ export function evaluateEligibility(entry, smsSettings) {
  */
 export async function sendWarrantySms(accountId, entry, smsSettings, options = {}) {
   const kind = "warranty";
-  const { eligible, reason } = evaluateEligibility(entry, smsSettings);
+  // ignoreSuppression is the manual-resend escape hatch: an owner who clicks
+  // Resend on a record they had earlier marked "don't text" has just overruled
+  // themselves, and silently skipping would look like the button was broken.
+  const { eligible, reason } = evaluateEligibility(entry, smsSettings, {
+    ignoreSuppression: options.ignoreSuppression === true
+  });
 
   // Opt-out is checked before claiming so a STOP customer doesn't get a claim
   // row that would block a legitimate resend if they later opt back in.

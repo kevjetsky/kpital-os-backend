@@ -64,6 +64,15 @@ const entrySchema = new mongoose.Schema(
     // a record that sits Pending on the bench for a week does not burn warranty.
     warrantyStartsAt: { type: Date, default: null },
     warrantyEndsAt: { type: Date, default: null },
+    // Per-record kill switch for the warranty text, ticked on the record form.
+    // Some jobs should not generate a customer text — a friend's console, a
+    // redo where asking for a review would be tone deaf, a number that belongs
+    // to a shop rather than a customer.
+    //
+    // Stored on the record rather than being a decision made at save time
+    // because the text fires when the job first reaches Completed/Paid, which
+    // is often a later save than the one where the box was ticked.
+    suppressSms: { type: Boolean, default: false },
     // How this record was (or will be) paid. Must be set once the record is Paid.
     paymentMethod: { type: String, default: "", trim: true },
     payments: [
