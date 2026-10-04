@@ -15,6 +15,7 @@ import taxRouter from "./routes/tax.js";
 import pushRouter from "./routes/push.js";
 import notificationsRouter from "./routes/notifications.js";
 import smsRouter from "./routes/sms.js";
+import { publicStickDriftRouter, adminStickDriftRouter } from "./routes/stickDrift.js";
 
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
 
@@ -57,6 +58,9 @@ app.disable("x-powered-by");
 app.use(compression());
 app.use(helmet());
 app.use(morgan("combined"));
+// Mounted before the dashboard CORS/origin guard: the wefixstickdrift site (SITE_URL) calls this,
+// and the router applies its own CORS, body limit and rate limit.
+app.use("/api/public/stick-drift", publicStickDriftRouter);
 app.use(
   cors({
     origin(origin, callback) {
@@ -92,6 +96,7 @@ app.use("/api/tax", taxRouter);
 app.use("/api/push", pushRouter);
 app.use("/api/notifications", notificationsRouter);
 app.use("/api/sms", smsRouter);
+app.use("/api/stick-drift", adminStickDriftRouter);
 
 if (process.env.SENTRY_DSN) {
   const Sentry = await import("@sentry/node");

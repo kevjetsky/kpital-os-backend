@@ -23,3 +23,12 @@ env_variables:
   # the route 403s rather than falling open, so a missing value can never
   # silently expose public registration.
   SIGNUP_INVITE_CODE: "generate-a-long-random-string"
+  # We Fix Stick Drift work orders (/api/public/stick-drift, /api/stick-drift).
+  # SITE_URL is the only browser origin allowed to call the public endpoints.
+  SITE_URL: "https://your-stick-drift-site.com"
+  # Pre-tax price per controller, in cents.
+  PRICE_CENTS: "4999"
+  # Where customers ship controllers; printed on the label as the ship-to address.
+  RECEIVING_ADDRESS: '{"name":"We Fix Stick Drift","street":"123 Main St","city":"Houston","state":"TX","zip":"77002"}'
+  # The account (Settings _id) that owns work orders created from the website.
+  STICK_DRIFT_ACCOUNT_ID: "your-account-object-id"
