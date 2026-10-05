@@ -282,6 +282,30 @@ describe("admin stick drift API", () => {
     expect((await admin("get", `/${workOrderNumber}`, otherToken)).status).toBe(404);
     expect((await admin("post", `/${workOrderNumber}/status`, otherToken).send({ status: "arrived" })).status).toBe(404);
     expect((await admin("post", `/${workOrderNumber}/notes`, otherToken).send({ text: "hi" })).status).toBe(404);
+    expect((await admin("delete", `/${workOrderNumber}`, otherToken)).status).toBe(404);
+    expect((await admin("get", `/${workOrderNumber}`)).status).toBe(200);
+  });
+
+  it("deletes a work order for good, from any status, without reusing its number", async () => {
+    const first = await place();
+    const second = await place();
+    await setStatus(second.workOrderNumber, "arrived");
+    await setStatus(second.workOrderNumber, "repaired");
+
+    expect((await request(app).delete(`/api/stick-drift/work-orders/${first.workOrderNumber}`)).status).toBe(401);
+
+    const res = await admin("delete", `/${first.workOrderNumber.toLowerCase()}`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ deleted: true, workOrderNumber: first.workOrderNumber });
+    expect((await admin("delete", `/${second.workOrderNumber}`)).status).toBe(200);
+
+    expect((await admin("get", `/${first.workOrderNumber}`)).status).toBe(404);
+    expect((await admin("delete", `/${first.workOrderNumber}`)).status).toBe(404);
+    expect((await pub("get", `/${first.token}`)).status).toBe(404);
+    expect((await admin("get")).body.workOrders).toEqual([]);
+
+    const third = await place();
+    expect(third.workOrderNumber).toBe("WFSD-1003");
   });
 
   it("lists newest first with counts, filters by status and searches", async () => {

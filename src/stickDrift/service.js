@@ -143,6 +143,17 @@ export async function addNote(accountId, workOrderNumber, text, { now = new Date
   return updated;
 }
 
+// Permanent, from any status. The number is not reused (the counter only goes up) and the
+// customer's label link stops working.
+export async function deleteWorkOrder(accountId, workOrderNumber) {
+  const deleted = await StickDriftWorkOrder.findOneAndDelete({
+    accountId,
+    workOrderNumber: String(workOrderNumber || "").trim().toUpperCase(),
+  });
+  if (!deleted) throw notFound();
+  return { deleted: true, workOrderNumber: deleted.workOrderNumber };
+}
+
 export async function setReturnTracking(accountId, workOrderNumber, returnTracking) {
   const updated = await StickDriftWorkOrder.findOneAndUpdate(
     { accountId, workOrderNumber: String(workOrderNumber || "").trim().toUpperCase() },

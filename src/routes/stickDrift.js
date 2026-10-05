@@ -128,6 +128,10 @@ adminStickDriftRouter.get("/work-orders/:workOrderNumber", handler(async (req, r
   res.json(await stickDrift.getWorkOrder(req.accountId, req.params.workOrderNumber));
 }));
 
+adminStickDriftRouter.delete("/work-orders/:workOrderNumber", handler(async (req, res) => {
+  res.json(await stickDrift.deleteWorkOrder(req.accountId, req.params.workOrderNumber));
+}));
+
 adminStickDriftRouter.post(
   "/work-orders/:workOrderNumber/status",
   validate(z.object({
