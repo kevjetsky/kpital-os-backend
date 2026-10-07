@@ -1,7 +1,7 @@
 export const SALES_TAX_RATE = 0.0825;
 export const ENTRY_TYPES = ["Sales", "Repair", "Expenses", "Refund", "Payroll", "Owner Draw"];
-// A refund hands back money that was booked as income with sales tax carved out
-// of it, so it also hands back the tax: salesTax goes negative at the current
+// A refund hands back the price that was booked as income along with the sales
+// tax charged on top of it: salesTax goes negative at the current
 // rate, which nets against the quarter's collected total.
 export const TAX_REVERSING_ENTRY_TYPES = ["Refund"];
 // The owner taking money out of a single-member LLC is a capital distribution,

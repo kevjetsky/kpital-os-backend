@@ -65,13 +65,16 @@ export function computeAmounts(income, expense, type = "", taxRate) {
     };
   }
 
-  // A refund gives back money that came in as income with tax carved out of it,
-  // so the tax comes back out too: the refunded amount sits in `expense` and
-  // salesTax goes negative, cancelling what the original sale added.
+  // Sales tax is charged on top of the price: `income` is the pre-tax price, the
+  // customer pays income + salesTax, and the tax is money held for the state, so
+  // it never reduces profit.
+  //
+  // A refund hands back the pre-tax amount in `expense` plus the tax collected on
+  // it, so salesTax goes negative, cancelling what the original sale added.
   const salesTax = TAX_REVERSING_ENTRY_TYPES.includes(type)
     ? -roundMoney(safeExpense * rate)
     : roundMoney(safeIncome * rate);
-  const netProfit = roundMoney(safeIncome - safeExpense - salesTax);
+  const netProfit = roundMoney(safeIncome - safeExpense);
 
   return {
     income: roundMoney(safeIncome),

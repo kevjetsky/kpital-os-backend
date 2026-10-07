@@ -26,8 +26,8 @@ describe("computeAmounts", () => {
   });
   it("computes netProfit correctly", () => {
     const result = computeAmounts(100, 20);
-    // 100 - 20 - 8.25 = 71.75
-    expect(result.netProfit).toBe(71.75);
+    // Tax is charged on top of the price, so it does not come out of profit: 100 - 20.
+    expect(result.netProfit).toBe(80);
   });
   it("handles non-finite values as zero", () => {
     const result = computeAmounts(NaN, undefined);
@@ -39,9 +39,9 @@ describe("computeAmounts", () => {
     const refund = computeAmounts(0, 100, "Refund");
     expect(refund.salesTax).toBe(-8.25);
     expect(sale.salesTax + refund.salesTax).toBe(0);
-    // The $8.25 of tax was carved out of the $100 taken in, so handing the $100
-    // back costs the business only the $91.75 it actually kept.
-    expect(refund.netProfit).toBe(-91.75);
+    // The $8.25 was collected on top of the $100 and goes back with it, so the
+    // refund costs the business exactly the $100 price it had kept.
+    expect(refund.netProfit).toBe(-100);
     expect(sale.netProfit + refund.netProfit).toBe(0);
   });
   it("taxes Payroll like any other outflow: nothing, since no income came in", () => {

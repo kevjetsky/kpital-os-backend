@@ -162,7 +162,8 @@ describe("GET /api/entries/summary — with draws", () => {
     // Only the heat gun is a business cost; the $650 draw is not.
     expect(res.body.range.expense).toBe(100);
     expect(res.body.range.ownerDraws).toBe(650);
-    // 1000 - 100 - 82.50 tax. The draw does not appear here at all.
-    expect(res.body.range.net).toBe(817.5);
+    // 1000 - 100; the $82.50 tax sits on top of the price, not in profit. The
+    // draw does not appear here at all.
+    expect(res.body.range.net).toBe(900);
   });
 });
