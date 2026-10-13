@@ -24,6 +24,15 @@ const entrySchema = new mongoose.Schema(
     customerAddress: { type: String, default: "", trim: true },
     customerReference: { type: String, default: "", trim: true },
     customerOptionId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    // Where the job was, broken out of customerAddress so jobs can be counted by
+    // area. Filled from the address lookup when there is one, otherwise from
+    // what the address text itself says. Blank on records with no address.
+    addressZip: { type: String, default: "", trim: true },
+    addressCity: { type: String, default: "", trim: true },
+    addressState: { type: String, default: "", trim: true },
+    addressNeighborhood: { type: String, default: "", trim: true },
+    addressLat: { type: Number, default: null },
+    addressLng: { type: Number, default: null },
     // B2B: this record was sold to (or refunded to) a saved business rather than
     // a walk-in customer. businessOptionId points at that business; businessName
     // is a snapshot so the record still names it after the business is deleted.

@@ -33,6 +33,7 @@ import {
   priceForRecord,
   serializeReferenceOption
 } from "../utils.js";
+import { parseAddressText, resolveAddress } from "../services/geoService.js";
 import {
   ENTRY_TYPES,
   ENTRY_STATUSES,
@@ -64,6 +65,9 @@ async function linkOrCreateCustomer(accountId, { name, phone, instagram, email, 
     if (phone) fills.phoneKey = normalizePhoneKey(phone);
     if (instagram) fills.instagramKey = normalizeInstagramHandle(instagram);
     if (email && !match.email) fills.email = email;
+    // Remembered so the customer's next record starts with their address (and
+    // area) without it being typed again.
+    if (address && !match.address) fills.address = address;
     if (Object.keys(fills).length > 0) {
       await ReferenceOption.updateOne({ _id: match._id, accountId }, { $set: fills });
     }
@@ -327,6 +331,81 @@ function businessAsCustomer(business) {
   };
 }
 
+const ADDRESS_FIELDS = ["addressZip", "addressCity", "addressState", "addressNeighborhood", "addressLat", "addressLng"];
+const NO_LOCATION = {
+  addressZip: "",
+  addressCity: "",
+  addressState: "",
+  addressNeighborhood: "",
+  addressLat: null,
+  addressLng: null
+};
+
+const zip5 = (value) => (String(value || "").match(/\b\d{5}\b/) || [""])[0];
+
+function cleanCoordinate(value, limit) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) && Math.abs(number) <= limit ? number : null;
+}
+
+// Where the job was, as area fields: ZIP code, city, neighborhood, coordinates.
+// `customerAddress` is the address already settled on for the record.
+//
+// The record form looks the address up as it is picked and sends what it found.
+// Anything else (the MCP, an address typed freehand) is looked up here, and when
+// that finds nothing the fields fall back to what the text itself says.
+async function resolveAddressFields(body, { customerAddress, existing = null, business = null } = {}) {
+  const text = String(customerAddress || "").trim();
+  if (!text) return { ...NO_LOCATION };
+
+  // What the request found only counts when it is about this very address (the
+  // text can also come from the customer's profile) and it actually found
+  // something; a form that sends the fields blank has not looked anything up.
+  const sentForThisAddress =
+    ADDRESS_FIELDS.some((field) => bodyHas(body, field)) && String(body.customerAddress ?? "").trim() === text;
+  if (sentForThisAddress) {
+    const zip = String(body.addressZip || "").trim();
+    const sent = {
+      addressZip: /^\d{5}$/.test(zip) ? zip : "",
+      addressCity: String(body.addressCity || "").trim().slice(0, 80),
+      addressState: String(body.addressState || "").trim().slice(0, 20),
+      addressNeighborhood: String(body.addressNeighborhood || "").trim().slice(0, 80),
+      addressLat: cleanCoordinate(body.addressLat, 90),
+      addressLng: cleanCoordinate(body.addressLng, 180)
+    };
+    if (sent.addressZip || sent.addressLat !== null) return sent;
+  }
+
+  // The same address as before keeps what is already known about it.
+  const unchanged = existing && text === String(existing.customerAddress || "").trim();
+  if (unchanged && (existing.addressZip || existing.addressLat != null)) {
+    return Object.fromEntries(ADDRESS_FIELDS.map((field) => [field, existing[field] ?? NO_LOCATION[field]]));
+  }
+
+  const found = await resolveAddress(text);
+  if (found) {
+    return {
+      addressZip: found.zip,
+      addressCity: found.city,
+      addressState: found.state,
+      addressNeighborhood: found.neighborhood,
+      addressLat: found.lat,
+      addressLng: found.lng
+    };
+  }
+
+  // On a B2B record the address is the business's own, so its profile fills in
+  // what the text does not spell out.
+  const parsed = parseAddressText(text);
+  return {
+    ...NO_LOCATION,
+    addressZip: parsed.zip || zip5(business?.postalCode),
+    addressCity: parsed.city || business?.city || "",
+    addressState: parsed.state || business?.state || ""
+  };
+}
+
 // The rate to reverse on a refund. A linked original gives back exactly the tax
 // it charged — prorated when only part of the sale is refunded — which stays
 // correct even if the account's tax rate changed since. Unlinked refunds fall
@@ -575,9 +654,123 @@ export const businessStatement = asyncHandler(async (req, res) => {
   });
 });
 
+// The most common non-empty value, so an area is named the way most of its
+// records name it.
+function mostCommon(values) {
+  const counts = new Map();
+  for (const value of values) {
+    if (value) counts.set(value, (counts.get(value) || 0) + 1);
+  }
+  let best = "";
+  let bestCount = 0;
+  for (const [value, count] of counts) {
+    if (count > bestCount) {
+      best = value;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+// GET /api/entries/area-stats[?from&to]
+// Sales and repairs grouped by the ZIP code of the job's address: how many
+// jobs, how much revenue and profit, and how many different customers each area
+// brought in. Refunds come off the area they were refunded to. Records with no
+// address are totalled separately so the coverage of the numbers is visible.
+export const areaStats = asyncHandler(async (req, res) => {
+  const { from, to } = req.query;
+  const query = { accountId: req.accountId, type: { $in: ["Sales", "Repair", "Refund"] } };
+
+  const range = {};
+  for (const [key, raw] of [["from", from], ["to", to]]) {
+    if (!raw) continue;
+    const parsed = new Date(String(raw));
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ message: `Invalid ${key} date.` });
+    }
+    if (key === "from") range.$gte = startOfUtcDay(parsed);
+    else range.$lt = addUtcDays(parsed, 1);
+  }
+  if (Object.keys(range).length > 0) query.date = range;
+
+  const entries = await Entry.find(query)
+    .select("date type income expense netProfit addressZip addressCity addressNeighborhood customerOptionId businessOptionId")
+    .lean();
+
+  const groups = new Map();
+  const totals = { jobs: 0, revenue: 0, profit: 0 };
+  const noAddress = { jobs: 0, revenue: 0 };
+  for (const entry of entries) {
+    const isRefund = entry.type === "Refund";
+    const revenue = isRefund ? -(entry.expense || 0) : entry.income || 0;
+    const jobs = isRefund ? 0 : 1;
+    totals.jobs += jobs;
+    totals.revenue += revenue;
+    totals.profit += entry.netProfit || 0;
+
+    if (!entry.addressZip) {
+      noAddress.jobs += jobs;
+      noAddress.revenue += revenue;
+      continue;
+    }
+    const group = groups.get(entry.addressZip) || {
+      zip: entry.addressZip,
+      jobs: 0,
+      revenue: 0,
+      profit: 0,
+      lastDate: null,
+      cities: [],
+      neighborhoods: [],
+      customers: new Set()
+    };
+    group.jobs += jobs;
+    group.revenue += revenue;
+    group.profit += entry.netProfit || 0;
+    group.cities.push(entry.addressCity);
+    group.neighborhoods.push(entry.addressNeighborhood);
+    const customer = entry.businessOptionId || entry.customerOptionId;
+    if (customer) group.customers.add(String(customer));
+    if (!isRefund && (!group.lastDate || entry.date > group.lastDate)) group.lastDate = entry.date;
+    groups.set(entry.addressZip, group);
+  }
+
+  const located = totals.revenue - noAddress.revenue;
+  const areas = Array.from(groups.values())
+    .map((group) => ({
+      zip: group.zip,
+      city: mostCommon(group.cities),
+      neighborhood: mostCommon(group.neighborhoods),
+      jobs: group.jobs,
+      revenue: roundMoney(group.revenue),
+      profit: roundMoney(group.profit),
+      avgTicket: group.jobs > 0 ? roundMoney(group.revenue / group.jobs) : 0,
+      // Share of the revenue that has an address, so the shares add up to 1.
+      share: located > 0 ? Number((group.revenue / located).toFixed(4)) : 0,
+      customers: group.customers.size,
+      lastDate: group.lastDate
+    }))
+    .sort((a, b) => b.revenue - a.revenue || b.jobs - a.jobs);
+
+  return res.json({
+    from: range.$gte || null,
+    to: to ? startOfUtcDay(new Date(String(to))) : null,
+    areas,
+    totals: { jobs: totals.jobs, revenue: roundMoney(totals.revenue), profit: roundMoney(totals.profit) },
+    noAddress: { jobs: noAddress.jobs, revenue: roundMoney(noAddress.revenue) }
+  });
+});
+
 export const list = asyncHandler(async (req, res) => {
-  const { type, status, page, limit, search, callbacks, b2b, businessOptionId, overdue } = req.query;
+  const { type, status, page, limit, search, callbacks, b2b, businessOptionId, overdue, zip } = req.query;
   const query = { accountId: req.accountId };
+
+  if (zip) {
+    const zipFilter = String(zip).trim();
+    if (!/^\d{5}$/.test(zipFilter)) {
+      return res.status(400).json({ message: "zip must be a 5-digit ZIP code." });
+    }
+    query.addressZip = zipFilter;
+  }
 
   // Combined with $and so it narrows, rather than replaces, a type or status
   // filter given alongside it.
@@ -639,6 +832,8 @@ export const list = asyncHandler(async (req, res) => {
       { customerInstagram: searchRegex },
       { customerEmail: searchRegex },
       { customerReference: searchRegex },
+      { customerAddress: searchRegex },
+      { addressNeighborhood: searchRegex },
       { businessName: searchRegex },
       { productServiceName: searchRegex },
       { category: searchRegex }
@@ -1217,6 +1412,8 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Description is required when no product/service is selected." });
   }
 
+  const location = await resolveAddressFields(body, { customerAddress, business: b2b.business });
+
   const refund = await resolveRefundOf(req.accountId, body, { type });
   if (refund.error) {
     return res.status(400).json({ message: refund.error });
@@ -1256,6 +1453,7 @@ export const create = asyncHandler(async (req, res) => {
     customerAddress,
     customerReference: customerReferenceLabel,
     customerOptionId,
+    ...location,
     isB2B: b2b.isB2B,
     businessOptionId: b2b.businessOptionId,
     businessName: b2b.businessName,
@@ -1597,6 +1795,8 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Description is required when no product/service is selected." });
   }
 
+  const location = await resolveAddressFields(req.body, { customerAddress, existing, business: b2b.business });
+
   const refund = await resolveRefundOf(req.accountId, req.body, { type, selfId: entryId, existing });
   if (refund.error) {
     return res.status(400).json({ message: refund.error });
@@ -1623,6 +1823,7 @@ export const update = asyncHandler(async (req, res) => {
   existing.customerAddress = customerAddress;
   existing.customerReference = customerReferenceLabel;
   existing.customerOptionId = customerOptionId;
+  Object.assign(existing, location);
   existing.isB2B = b2b.isB2B;
   existing.businessOptionId = b2b.businessOptionId;
   existing.businessName = b2b.businessName;
