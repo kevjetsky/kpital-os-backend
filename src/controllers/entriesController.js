@@ -389,7 +389,7 @@ async function resolveAddressFields(body, { customerAddress, existing = null, bu
       addressZip: found.zip,
       addressCity: found.city,
       addressState: found.state,
-      addressNeighborhood: found.neighborhood,
+      addressNeighborhood: "",
       addressLat: found.lat,
       addressLng: found.lng
     };

@@ -1,11 +1,12 @@
 // Address lookup for records, so jobs can be grouped by area.
 //
 // Two free services, neither needing a key:
-//  - Photon (OpenStreetMap) suggests streets as the owner types. Its house
-//    numbers and ZIP codes are patchy in Houston, so it is only trusted for the
-//    street and city.
 //  - The US Census geocoder turns a full address into its exact ZIP code and
-//    coordinates. That is what the area numbers are built on.
+//    coordinates. It is fast and dependable, and it is what the area numbers
+//    are built on.
+//  - Photon (OpenStreetMap) completes street names as the owner types. Its
+//    public server is throttled and its house numbers and ZIP codes are patchy
+//    in Houston, so it is only a typing aid: nothing depends on it answering.
 //
 // Every call is best-effort: a slow or failing service returns nothing and the
 // record is saved with whatever the address text itself says.
@@ -22,28 +23,34 @@ export function lookupEnabled() {
   return String(process.env.GEO_LOOKUP || "").toLowerCase() !== "off";
 }
 
-// Suggestions lean towards this point and stay inside this box. Defaults to
-// Houston and the area around it.
-function bias() {
+// Where the business works. Suggestions lean towards the center and stay inside
+// the box, and an address typed without a city is tried in the default one.
+// Defaults to Houston and the area around it.
+export function geoConfig() {
   const lat = Number(process.env.GEO_CENTER_LAT);
   const lon = Number(process.env.GEO_CENTER_LON);
   return {
     lat: Number.isFinite(lat) && lat !== 0 ? lat : 29.7604,
     lon: Number.isFinite(lon) && lon !== 0 ? lon : -95.3698,
-    bbox: process.env.GEO_BBOX || "-96.4,29.0,-94.6,30.6"
+    bbox: process.env.GEO_BBOX || "-96.4,29.0,-94.6,30.6",
+    defaultCity: process.env.GEO_DEFAULT_CITY || "Houston, TX"
   };
 }
 
-async function getJson(url, timeoutMs) {
+async function getJson(url, timeoutMs, { retries = 0 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(url, {
-      headers: { Accept: "application/json", "User-Agent": USER_AGENT },
-      signal: controller.signal
-    });
-    if (!response.ok) return null;
-    return await response.json();
+    for (let attempt = 0; ; attempt += 1) {
+      const response = await fetch(url, {
+        headers: { Accept: "application/json", "User-Agent": USER_AGENT },
+        signal: controller.signal
+      });
+      if (response.ok) return await response.json();
+      // A throttled server usually answers the very next request.
+      if (attempt >= retries || response.status < 500) return null;
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    }
   } catch {
     return null;
   } finally {
@@ -96,9 +103,16 @@ function zipOf(value) {
   return (String(value || "").match(/\b(\d{5})\b/) || [])[1] || "";
 }
 
-// One Photon result as an address suggestion, or null when it is not a place a
-// job could be at (a park with no street, a result outside the US).
-function toSuggestion(feature, query) {
+// "11822 Bandlon Dr" -> ["11822", "Bandlon Dr"]. Photon mostly knows streets,
+// not houses, so it is asked for the street and the number is put back after.
+function splitHouseNumber(text) {
+  const match = String(text).match(/^(\d+[A-Za-z]?)\s+(.*)$/);
+  return match ? [match[1], match[2]] : ["", String(text)];
+}
+
+// One Photon result as a street suggestion, or null when it is not a street a
+// job could be on (a park with no street, a result outside the US).
+function toStreetSuggestion(feature, houseNumber) {
   const p = feature?.properties || {};
   const [lng, lat] = feature?.geometry?.coordinates || [];
   if (p.countrycode && String(p.countrycode).toUpperCase() !== "US") return null;
@@ -106,105 +120,107 @@ function toSuggestion(feature, query) {
   const street = p.street || (p.type === "street" ? p.name : "");
   if (!street) return null;
 
-  // The number the owner typed wins: Photon often knows the street but not the
-  // house, and the Census lookup places the exact number afterwards.
-  const typedNumber = (String(query).match(/^\s*(\d+[A-Za-z]?)\s/) || [])[1] || "";
-  const number = typedNumber || p.housenumber || "";
-  const exactHouse = Boolean(p.housenumber) && (!typedNumber || typedNumber === String(p.housenumber));
-
   const city = p.city || "";
   const state = stateCode(p.state);
-  // A street-level match can sit in any of the ZIP codes a long road crosses,
-  // so its ZIP is left off until the exact address has been looked up.
-  const zip = exactHouse ? zipOf(p.postcode) : "";
-  const neighborhood = [p.locality, p.district].find((name) => name && name !== city) || "";
-
-  const line1 = [number, street].filter(Boolean).join(" ");
-  const line2 = [city, [state, zip].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+  const line1 = [houseNumber, street].filter(Boolean).join(" ");
+  // No ZIP: a street match can sit in any of the ZIP codes a long road crosses.
+  // The exact address is looked up once it is picked.
+  const line2 = [city, state].filter(Boolean).join(", ");
   return {
     label: [line1, line2].filter(Boolean).join(", "),
     line1,
     line2,
     city,
     state,
+    zip: "",
+    neighborhood: [p.locality, p.district].find((name) => name && name !== city) || "",
+    lat: Number.isFinite(lat) ? lat : null,
+    lng: Number.isFinite(lng) ? lng : null,
+    verified: false
+  };
+}
+
+async function streetSuggestions(text) {
+  const [houseNumber, street] = splitHouseNumber(text);
+  if (street.trim().length < 3) return [];
+
+  const { lat, lon, bbox } = geoConfig();
+  const params = new URLSearchParams({ q: street.trim(), lat: String(lat), lon: String(lon), limit: "10", lang: "en", bbox });
+  const data = await getJson(`${PHOTON_URL}/api/?${params}`, 4000, { retries: 1 });
+
+  const seen = new Set();
+  const suggestions = [];
+  for (const feature of data?.features || []) {
+    const suggestion = toStreetSuggestion(feature, houseNumber);
+    if (!suggestion) continue;
+    // One line per street and city: the stretches of a long road look the same.
+    const key = suggestion.label.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    suggestions.push(suggestion);
+  }
+  return suggestions;
+}
+
+async function censusMatch(text) {
+  const params = new URLSearchParams({ address: text, benchmark: "Public_AR_Current", format: "json" });
+  const data = await getJson(`${CENSUS_URL}?${params}`, 2500);
+  const match = data?.result?.addressMatches?.[0];
+  if (!match) return null;
+
+  const lat = Number(match.coordinates?.y);
+  const lng = Number(match.coordinates?.x);
+  const parts = match.addressComponents || {};
+  const [street] = String(match.matchedAddress || "").split(",");
+  const city = titleCaseAddress(parts.city);
+  const state = stateCode(parts.state);
+  const zip = zipOf(parts.zip);
+  const line1 = titleCaseAddress(street);
+  const line2 = [city, [state, zip].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+  return {
+    address: [line1, line2].filter(Boolean).join(", "),
+    line1,
+    line2,
+    city,
+    state,
     zip,
-    neighborhood,
     lat: Number.isFinite(lat) ? lat : null,
     lng: Number.isFinite(lng) ? lng : null
   };
 }
 
-/** Address suggestions for what has been typed so far. Never throws; [] when there is nothing to offer. */
+/**
+ * The exact ZIP code, city and coordinates of an address, or null when it
+ * cannot be placed (too little to go on, no such address, or the lookup is
+ * down). An address typed with no city or ZIP is tried in the default city.
+ */
+export async function resolveAddress(address) {
+  const text = String(address || "").trim().replace(/\s+/g, " ");
+  if (text.length < 6 || !/^\d/.test(text) || !/[A-Za-z]{2}/.test(text) || !lookupEnabled()) return null;
+
+  return cached(`r:${text.toLowerCase()}`, async () => {
+    const asTyped = await censusMatch(text);
+    if (asTyped) return asTyped;
+    const namesPlace = text.includes(",") || /\b\d{5}(-\d{4})?\s*$/.test(text);
+    return namesPlace ? null : censusMatch(`${text}, ${geoConfig().defaultCity}`);
+  });
+}
+
+/**
+ * Streets that what has been typed so far could be, with the typed house number
+ * kept in front. A typing aid only: the public server is slow and throttled, so
+ * the form asks for the exact address (resolveAddress) alongside and never waits
+ * on this. Never throws; [] when there is nothing to offer.
+ */
 export async function autocomplete(query) {
   const text = String(query || "").trim().replace(/\s+/g, " ");
   if (text.length < 4 || !lookupEnabled()) return [];
 
-  return (
-    (await cached(`a:${text.toLowerCase()}`, async () => {
-      const { lat, lon, bbox } = bias();
-      const params = new URLSearchParams({ q: text, lat: String(lat), lon: String(lon), limit: "10", lang: "en", bbox });
-      const data = await getJson(`${PHOTON_URL}/api/?${params}`, 2500);
-      if (!data) return null;
-
-      const seen = new Set();
-      const suggestions = [];
-      for (const feature of data.features || []) {
-        const suggestion = toSuggestion(feature, text);
-        if (!suggestion) continue;
-        // One line per street and city: the segments of a long road differ only
-        // in a ZIP that is not shown.
-        const key = `${suggestion.line1}|${suggestion.city}`.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        suggestions.push(suggestion);
-        if (suggestions.length === 5) break;
-      }
-      return suggestions;
-    })) || []
-  );
-}
-
-async function neighborhoodAt(lat, lng) {
-  const params = new URLSearchParams({ lat: String(lat), lon: String(lng), lang: "en" });
-  const data = await getJson(`${PHOTON_URL}/reverse?${params}`, 1200);
-  const p = data?.features?.[0]?.properties;
-  if (!p) return "";
-  return [p.locality, p.district].find((name) => name && name !== p.city) || "";
-}
-
-/**
- * The exact ZIP code, city and coordinates of a full address, or null when it
- * cannot be placed (too little to go on, no such address, or the lookup is down).
- */
-export async function resolveAddress(address) {
-  const text = String(address || "").trim().replace(/\s+/g, " ");
-  if (text.length < 6 || !/\d/.test(text) || !/[A-Za-z]/.test(text) || !lookupEnabled()) return null;
-
-  return cached(`r:${text.toLowerCase()}`, async () => {
-    const params = new URLSearchParams({ address: text, benchmark: "Public_AR_Current", format: "json" });
-    const data = await getJson(`${CENSUS_URL}?${params}`, 2500);
-    const match = data?.result?.addressMatches?.[0];
-    if (!match) return null;
-
-    const lat = Number(match.coordinates?.y);
-    const lng = Number(match.coordinates?.x);
-    const parts = match.addressComponents || {};
-    const [street] = String(match.matchedAddress || "").split(",");
-    const city = titleCaseAddress(parts.city);
-    const state = stateCode(parts.state);
-    const zip = zipOf(parts.zip);
-    const line1 = titleCaseAddress(street);
-
-    return {
-      address: [line1, [city, [state, zip].filter(Boolean).join(" ")].filter(Boolean).join(", ")].filter(Boolean).join(", "),
-      city,
-      state,
-      zip,
-      neighborhood: Number.isFinite(lat) && Number.isFinite(lng) ? await neighborhoodAt(lat, lng) : "",
-      lat: Number.isFinite(lat) ? lat : null,
-      lng: Number.isFinite(lng) ? lng : null
-    };
+  const streets = await cached(`a:${text.toLowerCase()}`, async () => {
+    const found = await streetSuggestions(text);
+    return found.length > 0 ? found : null;
   });
+  return (streets || []).slice(0, 5);
 }
 
 /** What the address text itself says, for when no lookup is available: "..., City, ST 77002". */

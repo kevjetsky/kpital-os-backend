@@ -62,8 +62,11 @@ function stubLookups({ photon = { features: [] }, census = { result: { addressMa
     vi.fn(async (url) => {
       const href = String(url);
       calls.push(href);
-      const body = href.includes("census.gov") ? census : href.includes("/reverse") ? reverse : photon;
+      const source = href.includes("census.gov") ? census : href.includes("/reverse") ? reverse : photon;
+      // A function answers per request, e.g. differently for a retried address.
+      const body = typeof source === "function" ? source(decodeURIComponent(href.replace(/\+/g, " "))) : source;
       if (body instanceof Error) throw body;
+      if (typeof body === "number") return { ok: false, status: body, json: async () => ({}) };
       return { ok: true, json: async () => body };
     })
   );
@@ -84,7 +87,7 @@ describe("address lookup", () => {
           // Another stretch of the same road, in another ZIP code.
           photonFeature({ type: "street", name: "Bissonnet Street", city: "Houston", postcode: "77036" }),
           photonFeature({ type: "street", name: "Bissonnet Street", city: "Bellaire", postcode: "77401" }),
-          photonFeature({ type: "house", housenumber: "9800", street: "Bissonnet Road", city: "Houston", postcode: "77036", district: "Sharpstown" }),
+          photonFeature({ type: "house", housenumber: "12", street: "Bissonnet Road", city: "Houston", postcode: "77036", district: "Sharpstown" }),
           // A park with no street is not somewhere a job happens.
           photonFeature({ type: "other", name: "Bissonnet Park", city: "Houston" }),
           photonFeature({ type: "street", name: "Bissonnet Strasse", city: "Berlin", countrycode: "DE" })
@@ -92,22 +95,41 @@ describe("address lookup", () => {
       }
     });
 
-    const res = await authed(request(app).get("/api/geo/autocomplete?q=9800%20Bissonnet"));
+    const res = await authed(request(app).get("/api/geo/autocomplete?q=9800%20Bisso"));
     expect(res.status).toBe(200);
     expect(res.body.suggestions.map((s) => s.label)).toEqual([
       "9800 Bissonnet Street, Houston, TX",
       "9800 Bissonnet Street, Bellaire, TX",
-      "9800 Bissonnet Road, Houston, TX 77036"
+      "9800 Bissonnet Road, Houston, TX"
     ]);
     // A street match could be in any ZIP the road crosses, so it claims none.
-    expect(res.body.suggestions[0].zip).toBe("");
-    expect(res.body.suggestions[2]).toMatchObject({ zip: "77036", neighborhood: "Sharpstown", lat: 29.7088 });
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("photon.komoot.io/api");
+    expect(res.body.suggestions[0]).toMatchObject({ zip: "", verified: false });
+    expect(res.body.suggestions[2]).toMatchObject({ neighborhood: "Sharpstown", lat: 29.7088 });
+    // The street service is asked for the street, without the house number.
+    const photonCalls = calls.filter((href) => href.includes("photon.komoot.io/api"));
+    expect(photonCalls).toHaveLength(1);
+    expect(decodeURIComponent(photonCalls[0])).toContain("q=Bisso&");
 
     // The same text again is answered from memory.
-    await authed(request(app).get("/api/geo/autocomplete?q=9800%20bissonnet"));
-    expect(calls).toHaveLength(1);
+    await authed(request(app).get("/api/geo/autocomplete?q=9800%20bisso"));
+    expect(calls.filter((href) => href.includes("photon.komoot.io/api"))).toHaveLength(1);
+  });
+
+  it("retries a throttled street service once, and gives up quietly if it stays down", async () => {
+    let attempts = 0;
+    const calls = stubLookups({
+      photon: () => {
+        attempts += 1;
+        return attempts === 1 ? 503 : { features: [photonFeature({ type: "street", name: "Bandlon Drive", city: "Houston" })] };
+      }
+    });
+    const res = await authed(request(app).get("/api/geo/autocomplete?q=11822%20bandl"));
+    expect(res.body.suggestions.map((s) => s.label)).toEqual(["11822 Bandlon Drive, Houston, TX"]);
+    expect(calls).toHaveLength(2);
+
+    clearGeoCache();
+    stubLookups({ photon: 503 });
+    expect((await authed(request(app).get("/api/geo/autocomplete?q=11822%20bandl"))).body.suggestions).toEqual([]);
   });
 
   it("asks nothing for a few letters, and returns nothing when the service is down or switched off", async () => {
@@ -122,30 +144,48 @@ describe("address lookup", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("resolves a full address to its exact ZIP code, coordinates and neighborhood", async () => {
-    stubLookups({
-      census: censusMatch("9800 BISSONNET ST, HOUSTON, TX, 77036", "HOUSTON", "77036", [-95.55023, 29.6754]),
-      reverse: { features: [photonFeature({ city: "Houston", district: "Sharpstown" })] }
-    });
+  it("resolves a full address to its exact ZIP code and coordinates", async () => {
+    stubLookups({ census: censusMatch("9800 BISSONNET ST, HOUSTON, TX, 77036", "HOUSTON", "77036", [-95.55023, 29.6754]) });
 
-    const res = await authed(request(app).get("/api/geo/resolve?address=9800%20bissonnet%20st%20apt%204%20houston"));
+    const res = await authed(request(app).get("/api/geo/resolve?address=9800%20bissonnet%20st%20apt%204%2C%20houston"));
     expect(res.body.match).toEqual({
       address: "9800 Bissonnet St, Houston, TX 77036",
+      line1: "9800 Bissonnet St",
+      line2: "Houston, TX 77036",
       city: "Houston",
       state: "TX",
       zip: "77036",
-      neighborhood: "Sharpstown",
       lat: 29.6754,
       lng: -95.55023
     });
   });
 
+  it("tries the default city for an address typed without one", async () => {
+    const calls = stubLookups({
+      census: (href) =>
+        href.includes("Houston, TX")
+          ? censusMatch("11822 BANDLON DR, HOUSTON, TX, 77072", "HOUSTON", "77072", [-95.58555, 29.71009])
+          : { result: { addressMatches: [] } }
+    });
+
+    const res = await authed(request(app).get("/api/geo/resolve?address=11822%20bandlon%20dr"));
+    expect(res.body.match).toMatchObject({ address: "11822 Bandlon Dr, Houston, TX 77072", zip: "77072" });
+    expect(calls).toHaveLength(2);
+  });
+
   it("returns no match for an address that cannot be placed", async () => {
     const calls = stubLookups();
-    expect((await authed(request(app).get("/api/geo/resolve?address=123%20Nowhere%20Rd%2C%20Houston"))).body.match).toBeNull();
+    // It names a city, so the default one is not tried on top.
+    expect((await authed(request(app).get("/api/geo/resolve?address=123%20Nowhere%20Rd%2C%20Katy"))).body.match).toBeNull();
+    expect(calls).toHaveLength(1);
     // Too little to be an address: not even asked.
     expect((await authed(request(app).get("/api/geo/resolve?address=bandlon"))).body.match).toBeNull();
     expect(calls).toHaveLength(1);
+  });
+
+  it("says where the business works, so areas can be described from there", async () => {
+    const res = await authed(request(app).get("/api/geo/config"));
+    expect(res.body).toEqual({ center: { lat: 29.7604, lng: -95.3698 }, defaultCity: "Houston, TX" });
   });
 
   it("reads city and ZIP out of address text, and writes street names the way people do", () => {
@@ -207,8 +247,7 @@ describe("a record's area", () => {
 
   it("looks the address up itself when the request did not, as for a record made through the MCP", async () => {
     stubLookups({
-      census: censusMatch("11822 BANDLON DR, HOUSTON, TX, 77072", "HOUSTON", "77072", [-95.58555, 29.71009]),
-      reverse: { features: [photonFeature({ city: "Houston", locality: "Alief" })] }
+      census: censusMatch("11822 BANDLON DR, HOUSTON, TX, 77072", "HOUSTON", "77072", [-95.58555, 29.71009])
     });
 
     const res = await postEntry(repair({ customerAddress: "11822 Bandlon Dr, Houston" }));
@@ -216,8 +255,9 @@ describe("a record's area", () => {
       customerAddress: "11822 Bandlon Dr, Houston",
       addressZip: "77072",
       addressCity: "Houston",
-      addressNeighborhood: "Alief",
-      addressLat: 29.71009
+      addressState: "TX",
+      addressLat: 29.71009,
+      addressLng: -95.58555
     });
   });
 

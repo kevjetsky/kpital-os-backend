@@ -2,7 +2,7 @@ import { Router } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { requireAuth } from "../middleware/auth.js";
 import { asyncHandler } from "../utils.js";
-import { autocomplete, resolveAddress } from "../services/geoService.js";
+import { autocomplete, geoConfig, resolveAddress } from "../services/geoService.js";
 
 const router = Router();
 
@@ -20,7 +20,15 @@ router.use(
   })
 );
 
-// GET /api/geo/autocomplete?q= — street suggestions for what has been typed.
+// GET /api/geo/config — the point the business works around, so the dashboard
+// can describe an area by its direction and distance from it.
+router.get("/config", (_req, res) => {
+  const { lat, lon, defaultCity } = geoConfig();
+  res.json({ center: { lat, lng: lon }, defaultCity });
+});
+
+// GET /api/geo/autocomplete?q= — streets that what has been typed could be. Slow
+// and best-effort; the form asks /resolve alongside and shows that first.
 router.get(
   "/autocomplete",
   asyncHandler(async (req, res) => {
