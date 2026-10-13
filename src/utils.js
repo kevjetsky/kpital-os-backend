@@ -47,10 +47,14 @@ export function issueAuthToken(accountId) {
   });
 }
 
-export function computeAmounts(income, expense, type = "", taxRate) {
+export function computeAmounts(income, expense, type = "", taxRate, { taxExempt = false } = {}) {
   const safeIncome = Number.isFinite(income) ? income : 0;
   const safeExpense = Number.isFinite(expense) ? expense : 0;
-  const rate = (Number.isFinite(taxRate) && taxRate >= 0 && taxRate <= 1) ? taxRate : SALES_TAX_RATE;
+  // A tax-exempt record (a B2B sale under a resale/exemption certificate)
+  // charges no sales tax, and a refund of one has none to give back.
+  const rate = taxExempt
+    ? 0
+    : (Number.isFinite(taxRate) && taxRate >= 0 && taxRate <= 1) ? taxRate : SALES_TAX_RATE;
 
   // An Owner Draw is a capital distribution, not an expense the business can
   // deduct: the money leaves the account (it keeps its `expense` amount) but it
@@ -287,6 +291,33 @@ export function serializeReferenceOption(option) {
       // Surfaced so detail screens can show audit timestamps. Mongoose sets
       // these via `timestamps: true`; documents created before that may lack
       // them, hence the null fallback.
+      createdAt: option.createdAt || null,
+      updatedAt: option.updatedAt || null
+    };
+  }
+
+  if (option.kind === "business") {
+    const addressLine1 = option.addressLine1 || "";
+    const addressLine2 = option.addressLine2 || "";
+    const city = option.city || "";
+    const state = option.state || "";
+    const postalCode = option.postalCode || "";
+
+    return {
+      _id: String(option._id),
+      name: option.name,
+      contactName: option.contactName || "",
+      phone: option.phone || "",
+      email: option.email || "",
+      address: formatCustomerAddress({ addressLine1, addressLine2, city, state, postalCode }) || option.address || "",
+      addressLine1,
+      addressLine2,
+      city,
+      state,
+      postalCode,
+      taxExempt: Boolean(option.taxExempt),
+      taxExemptId: option.taxExemptId || "",
+      notes: option.notes || "",
       createdAt: option.createdAt || null,
       updatedAt: option.updatedAt || null
     };

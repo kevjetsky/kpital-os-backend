@@ -23,7 +23,10 @@ export const PAYMENT_METHODS = ["Cash", "Card", "Zelle", "Cash App", "Chime", "P
 // Entry types that represent customer-facing work and therefore require a
 // reachable customer (phone or Instagram) on every record.
 export const CUSTOMER_REQUIRED_ENTRY_TYPES = ["Repair", "Sales"];
-export const REFERENCE_OPTION_KINDS = ["customer", "product_service"];
+export const REFERENCE_OPTION_KINDS = ["customer", "product_service", "business"];
+// Entry types that can be marked B2B (sold to, or refunded to, a saved business).
+// Money-out types other than a refund have no buyer, so the flag is dropped on them.
+export const B2B_ENTRY_TYPES = ["Sales", "Repair", "Refund"];
 // How long after a repair a returning customer counts as a warranty callback.
 export const WARRANTY_DAYS = 40;
 // The message a customer gets when their repair is finished. Kept here rather

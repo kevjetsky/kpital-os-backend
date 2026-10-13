@@ -34,6 +34,7 @@ import {
   EXPENSE_CATEGORIES,
   PAYMENT_METHODS,
   CUSTOMER_REQUIRED_ENTRY_TYPES,
+  B2B_ENTRY_TYPES,
   PROFIT_NEUTRAL_ENTRY_TYPES,
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
@@ -227,6 +228,62 @@ async function resolveRefundOf(accountId, body, { type, selfId = null, existing 
   return { refundOf, error: null };
 }
 
+// B2B: the record is sold to (or refunded to) a saved business rather than a
+// walk-in customer. Returns the fields to store, plus the business document when
+// this request named one (null when the stored link is simply being kept).
+//
+// A B2B record always names a business, so a missing or empty businessOptionId
+// means "no change", never "remove"; unticking isB2B is how a record leaves B2B.
+// That also keeps a record editable after its business was deleted: the link is
+// gone but the name snapshot still says who it was for.
+async function resolveB2BFields(accountId, body, { type, existing = null } = {}) {
+  const none = { isB2B: false, businessOptionId: null, businessName: "", taxExempt: false, business: null, error: null };
+
+  const isB2B = bodyHas(body, "isB2B") ? Boolean(body.isB2B) : Boolean(existing?.isB2B);
+  if (!isB2B || !B2B_ENTRY_TYPES.includes(type)) return none;
+
+  const wasB2B = Boolean(existing?.isB2B);
+  let businessOptionId = wasB2B && existing.businessOptionId ? String(existing.businessOptionId) : null;
+  let businessName = wasB2B ? existing.businessName || "" : "";
+  let business = null;
+
+  const resolved = await resolveReferenceOption(accountId, "business", body?.businessOptionId);
+  if (resolved.error) {
+    return { ...none, error: resolved.error.includes("not found") ? "Business not found." : "Invalid business id." };
+  }
+  if (resolved.option) {
+    business = resolved.option;
+    businessOptionId = resolved.optionId;
+    businessName = resolved.option.name;
+  }
+
+  if (!businessOptionId && !businessName) {
+    return { ...none, error: "Choose the business this B2B record is for." };
+  }
+
+  // Unless the request says otherwise, a record keeps its own tax treatment, and
+  // a record that is only now becoming B2B takes the business's default.
+  const taxExempt = bodyHas(body, "taxExempt")
+    ? Boolean(body.taxExempt)
+    : wasB2B ? Boolean(existing.taxExempt) : Boolean(business?.taxExempt);
+
+  return { isB2B: true, businessOptionId, businessName, taxExempt, business, error: null };
+}
+
+// On a B2B record the business is the customer: its details fill the customer
+// fields so lists, search, receipts and refunds all show who paid. It is never
+// linked to (or turned into) a walk-in customer profile.
+function businessAsCustomer(business) {
+  return {
+    customerName: business.name,
+    customerPhone: business.phone || "",
+    customerInstagram: "",
+    customerEmail: business.email || "",
+    customerAddress: business.address || "",
+    customerReference: ""
+  };
+}
+
 // The rate to reverse on a refund. A linked original gives back exactly the tax
 // it charged — prorated when only part of the sale is refunded — which stays
 // correct even if the account's tax rate changed since. Unlinked refunds fall
@@ -379,8 +436,25 @@ async function attachRefundLinks(accountId, entries) {
 }
 
 export const list = asyncHandler(async (req, res) => {
-  const { type, status, page, limit, search, callbacks } = req.query;
+  const { type, status, page, limit, search, callbacks, b2b, businessOptionId } = req.query;
   const query = { accountId: req.accountId };
+
+  if (b2b !== undefined) {
+    const flag = String(b2b).toLowerCase();
+    if (flag === "true" || flag === "1") {
+      query.isB2B = true;
+    } else if (flag === "false" || flag === "0") {
+      query.isB2B = { $ne: true };
+    }
+  }
+
+  if (businessOptionId) {
+    const businessFilter = String(businessOptionId).trim();
+    if (!mongoose.Types.ObjectId.isValid(businessFilter)) {
+      return res.status(400).json({ message: "Invalid businessOptionId." });
+    }
+    query.businessOptionId = businessFilter;
+  }
 
   if (callbacks !== undefined) {
     const flag = String(callbacks).toLowerCase();
@@ -419,6 +493,7 @@ export const list = asyncHandler(async (req, res) => {
       { customerInstagram: searchRegex },
       { customerEmail: searchRegex },
       { customerReference: searchRegex },
+      { businessName: searchRegex },
       { productServiceName: searchRegex },
       { category: searchRegex }
     ];
@@ -572,7 +647,7 @@ export const summary = asyncHandler(async (req, res) => {
 // their recent Repair entries inside the warranty window — the jobs a new
 // visit could be a callback on.
 export const warrantyCandidates = asyncHandler(async (req, res) => {
-  const { customerOptionId, phone, instagram, date, windowDays, excludeId } = req.query;
+  const { customerOptionId, businessOptionId, phone, instagram, date, windowDays, excludeId } = req.query;
 
   const parsedWindow = windowDays !== undefined ? Number(windowDays) : WARRANTY_DAYS;
   if (!Number.isFinite(parsedWindow) || parsedWindow <= 0 || parsedWindow > 365) {
@@ -584,15 +659,22 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "Invalid date." });
   }
 
+  // A B2B repair belongs to a business, not a customer profile, so its recent
+  // jobs are found by the business it was done for.
+  const businessId = String(businessOptionId || "").trim();
+  if (businessId && !mongoose.Types.ObjectId.isValid(businessId)) {
+    return res.status(400).json({ message: "Invalid businessOptionId." });
+  }
+
   let optionId = String(customerOptionId || "").trim();
   if (optionId && !mongoose.Types.ObjectId.isValid(optionId)) {
     return res.status(400).json({ message: "Invalid customerOptionId." });
   }
-  if (!optionId) {
+  if (!businessId && !optionId) {
     const cleanPhone = String(phone || "").trim();
     const cleanInstagram = normalizeInstagramHandle(instagram);
     if (!cleanPhone && !cleanInstagram) {
-      return res.status(400).json({ message: "Provide customerOptionId, phone, or instagram." });
+      return res.status(400).json({ message: "Provide customerOptionId, businessOptionId, phone, or instagram." });
     }
     const match = await findCustomerByContact(req.accountId, cleanPhone, cleanInstagram);
     if (!match) {
@@ -604,7 +686,7 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
   const windowStart = new Date(referenceDate.getTime() - parsedWindow * 24 * 60 * 60 * 1000);
   const query = {
     accountId: req.accountId,
-    customerOptionId: optionId,
+    ...(businessId ? { businessOptionId: businessId } : { customerOptionId: optionId }),
     type: "Repair",
     date: { $gte: windowStart, $lte: referenceDate }
   };
@@ -618,7 +700,7 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
     .select("date description productServiceName income status isWarrantyCallback callbackOf customerName")
     .lean();
 
-  return res.json({ windowDays: parsedWindow, customerOptionId: optionId, candidates });
+  return res.json({ windowDays: parsedWindow, customerOptionId: businessId ? null : optionId, candidates });
 });
 
 // GET /api/entries/refund-candidates
@@ -627,7 +709,7 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
 // of you), otherwise the most recent money-in records, searchable by hand for
 // the case where the refund is booked without customer details.
 export const refundCandidates = asyncHandler(async (req, res) => {
-  const { customerOptionId, phone, instagram, search, excludeId, limit } = req.query;
+  const { customerOptionId, businessOptionId, phone, instagram, search, excludeId, limit } = req.query;
 
   const parsedLimit = limit !== undefined ? Number(limit) : 20;
   if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
@@ -636,11 +718,16 @@ export const refundCandidates = asyncHandler(async (req, res) => {
 
   const query = { accountId: req.accountId, income: { $gt: 0 } };
 
+  const businessId = String(businessOptionId || "").trim();
+  if (businessId && !mongoose.Types.ObjectId.isValid(businessId)) {
+    return res.status(400).json({ message: "Invalid businessOptionId." });
+  }
+
   let optionId = String(customerOptionId || "").trim();
   if (optionId && !mongoose.Types.ObjectId.isValid(optionId)) {
     return res.status(400).json({ message: "Invalid customerOptionId." });
   }
-  if (!optionId) {
+  if (!businessId && !optionId) {
     const cleanPhone = String(phone || "").trim();
     const cleanInstagram = normalizeInstagramHandle(instagram);
     if (cleanPhone || cleanInstagram) {
@@ -648,7 +735,9 @@ export const refundCandidates = asyncHandler(async (req, res) => {
       optionId = match ? String(match._id) : "";
     }
   }
-  if (optionId) {
+  if (businessId) {
+    query.businessOptionId = businessId;
+  } else if (optionId) {
     query.customerOptionId = optionId;
   }
 
@@ -838,7 +927,14 @@ export const create = asyncHandler(async (req, res) => {
   const notes = String(body.notes || "").trim();
   const rawCategory = String(body.category || "").trim();
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
-  const suppressSms = Boolean(body.suppressSms);
+
+  const b2b = await resolveB2BFields(req.accountId, body, { type });
+  if (b2b.error) {
+    return res.status(400).json({ message: b2b.error });
+  }
+  // The warranty text asks for a review, which reads oddly sent to a store on
+  // every unit, so a B2B record stays quiet unless the request asks otherwise.
+  const suppressSms = bodyHas(body, "suppressSms") ? Boolean(body.suppressSms) : b2b.isB2B;
 
   const callback = await resolveCallbackFields(req.accountId, body);
   if (callback.error) {
@@ -868,6 +964,16 @@ export const create = asyncHandler(async (req, res) => {
   let customerAddress = String(body.customerAddress || "").trim();
   let customerReferenceLabel = String(body.customerReference || "").trim();
   let customerOptionId = null;
+  if (b2b.isB2B) {
+    ({
+      customerName,
+      customerPhone,
+      customerInstagram,
+      customerEmail,
+      customerAddress,
+      customerReference: customerReferenceLabel
+    } = businessAsCustomer(b2b.business));
+  }
 
   const rawPaymentMethod = String(body.paymentMethod || "").trim();
   const paymentMethod = toPaymentMethod(rawPaymentMethod);
@@ -887,7 +993,9 @@ export const create = asyncHandler(async (req, res) => {
   let productServicePrice = parsedProductPrice.value;
   let productServiceOptionId = null;
 
-  const customerRefOption = await resolveReferenceOption(req.accountId, "customer", body.customerOptionId);
+  const customerRefOption = b2b.isB2B
+    ? { option: null, optionId: null, error: null }
+    : await resolveReferenceOption(req.accountId, "customer", body.customerOptionId);
   if (customerRefOption.error) {
     return res.status(400).json({ message: customerRefOption.error });
   }
@@ -911,7 +1019,7 @@ export const create = asyncHandler(async (req, res) => {
     if (Object.keys(fills).length > 0) {
       await ReferenceOption.updateOne({ _id: option._id, accountId: req.accountId }, { $set: fills });
     }
-  } else if (customerPhone || customerInstagram) {
+  } else if (!b2b.isB2B && (customerPhone || customerInstagram)) {
     const customer = await linkOrCreateCustomer(req.accountId, {
       name: customerName,
       phone: customerPhone,
@@ -929,7 +1037,7 @@ export const create = asyncHandler(async (req, res) => {
     customerReferenceLabel = customerReferenceLabel || customer.reference || "";
   }
 
-  if (CUSTOMER_REQUIRED_ENTRY_TYPES.includes(type) && !customerPhone && !customerInstagram) {
+  if (!b2b.isB2B && CUSTOMER_REQUIRED_ENTRY_TYPES.includes(type) && !customerPhone && !customerInstagram) {
     return res.status(400).json({
       message: `A customer phone number or Instagram username is required for ${type} records.`
     });
@@ -971,7 +1079,7 @@ export const create = asyncHandler(async (req, res) => {
   const rawTaxRate = body.taxRate !== undefined ? Number(body.taxRate) : undefined;
   const taxRate = await resolveRefundTaxRate(req.accountId, refund.refundOf, rawTaxRate);
   const expense = roundMoney(manualExpense + inventory.inventoryCost);
-  const amounts = computeAmounts(income, expense, type, taxRate);
+  const amounts = computeAmounts(income, expense, type, taxRate, { taxExempt: b2b.taxExempt });
   await assertInventoryUsageAvailable(req.accountId, [], inventory.usage);
 
   let entry;
@@ -1002,6 +1110,10 @@ export const create = asyncHandler(async (req, res) => {
     customerAddress,
     customerReference: customerReferenceLabel,
     customerOptionId,
+    isB2B: b2b.isB2B,
+    businessOptionId: b2b.businessOptionId,
+    businessName: b2b.businessName,
+    taxExempt: b2b.taxExempt,
     paymentMethod,
     productServiceName,
     productServiceType,
@@ -1102,6 +1214,16 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: callback.error });
   }
 
+  const b2b = await resolveB2BFields(req.accountId, req.body, { type, existing });
+  if (b2b.error) {
+    return res.status(400).json({ message: b2b.error });
+  }
+  // On a B2B record the customer fields come from the business, so whatever the
+  // request says about the customer is ignored. A record leaving B2B drops the
+  // business's details instead of carrying a store over as a walk-in customer.
+  const customerBody = b2b.isB2B ? {} : req.body;
+  const leavingB2B = Boolean(existing.isB2B) && !b2b.isB2B;
+
   let paymentMethod = toPaymentMethod(existing.paymentMethod) || "";
   if (bodyHas(req.body, "paymentMethod")) {
     const rawPaymentMethod = String(req.body.paymentMethod || "").trim();
@@ -1115,46 +1237,56 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: "A payment method is required to mark a record as Paid." });
   }
 
-  let customerName = existing.customerName || "";
-  let customerPhone = existing.customerPhone || "";
-  let customerInstagram = normalizeInstagramHandle(existing.customerInstagram);
-  let customerEmail = existing.customerEmail || "";
-  let customerAddress = existing.customerAddress || "";
-  let customerReferenceLabel = existing.customerReference || "";
-  let customerOptionId = existing.customerOptionId ? String(existing.customerOptionId) : null;
+  let customerName = leavingB2B ? "" : existing.customerName || "";
+  let customerPhone = leavingB2B ? "" : existing.customerPhone || "";
+  let customerInstagram = leavingB2B ? "" : normalizeInstagramHandle(existing.customerInstagram);
+  let customerEmail = leavingB2B ? "" : existing.customerEmail || "";
+  let customerAddress = leavingB2B ? "" : existing.customerAddress || "";
+  let customerReferenceLabel = leavingB2B ? "" : existing.customerReference || "";
+  let customerOptionId = !b2b.isB2B && existing.customerOptionId ? String(existing.customerOptionId) : null;
+  if (b2b.business) {
+    ({
+      customerName,
+      customerPhone,
+      customerInstagram,
+      customerEmail,
+      customerAddress,
+      customerReference: customerReferenceLabel
+    } = businessAsCustomer(b2b.business));
+  }
   const customerFieldsTouched = ["customerOptionId", "customerName", "customerPhone", "customerInstagram", "customerEmail"]
-    .some((field) => bodyHas(req.body, field));
+    .some((field) => bodyHas(customerBody, field));
 
   let productServiceName = existing.productServiceName || "";
   let productServiceType = toProductServiceType(existing.productServiceType);
   let productServicePrice = Number.isFinite(existing.productServicePrice) ? existing.productServicePrice : 0;
   let productServiceOptionId = existing.productServiceOptionId ? String(existing.productServiceOptionId) : null;
 
-  if (bodyHas(req.body, "customerName")) {
-    customerName = String(req.body.customerName || "").trim();
-    if (!bodyHas(req.body, "customerOptionId")) {
+  if (bodyHas(customerBody, "customerName")) {
+    customerName = String(customerBody.customerName || "").trim();
+    if (!bodyHas(customerBody, "customerOptionId")) {
       customerOptionId = null;
     }
   }
 
-  if (bodyHas(req.body, "customerPhone")) {
-    customerPhone = String(req.body.customerPhone || "").trim();
+  if (bodyHas(customerBody, "customerPhone")) {
+    customerPhone = String(customerBody.customerPhone || "").trim();
   }
 
-  if (bodyHas(req.body, "customerInstagram")) {
-    customerInstagram = normalizeInstagramHandle(req.body.customerInstagram);
+  if (bodyHas(customerBody, "customerInstagram")) {
+    customerInstagram = normalizeInstagramHandle(customerBody.customerInstagram);
   }
 
-  if (bodyHas(req.body, "customerEmail")) {
-    customerEmail = String(req.body.customerEmail || "").trim();
+  if (bodyHas(customerBody, "customerEmail")) {
+    customerEmail = String(customerBody.customerEmail || "").trim();
   }
 
-  if (bodyHas(req.body, "customerAddress")) {
-    customerAddress = String(req.body.customerAddress || "").trim();
+  if (bodyHas(customerBody, "customerAddress")) {
+    customerAddress = String(customerBody.customerAddress || "").trim();
   }
 
-  if (bodyHas(req.body, "customerReference")) {
-    customerReferenceLabel = String(req.body.customerReference || "").trim();
+  if (bodyHas(customerBody, "customerReference")) {
+    customerReferenceLabel = String(customerBody.customerReference || "").trim();
   }
 
   if (bodyHas(req.body, "productServiceName")) {
@@ -1176,44 +1308,44 @@ export const update = asyncHandler(async (req, res) => {
     productServicePrice = parsedPrice.value;
   }
 
-  if (bodyHas(req.body, "customerOptionId")) {
-    const customerRefOption = await resolveReferenceOption(req.accountId, "customer", req.body.customerOptionId);
+  if (bodyHas(customerBody, "customerOptionId")) {
+    const customerRefOption = await resolveReferenceOption(req.accountId, "customer", customerBody.customerOptionId);
     if (customerRefOption.error) {
       return res.status(400).json({ message: customerRefOption.error });
     }
 
     if (!customerRefOption.option) {
       customerOptionId = null;
-      if (!bodyHas(req.body, "customerName")) {
+      if (!bodyHas(customerBody, "customerName")) {
         customerName = "";
       }
-      if (!bodyHas(req.body, "customerPhone")) {
+      if (!bodyHas(customerBody, "customerPhone")) {
         customerPhone = "";
       }
-      if (!bodyHas(req.body, "customerInstagram")) {
+      if (!bodyHas(customerBody, "customerInstagram")) {
         customerInstagram = "";
       }
-      if (!bodyHas(req.body, "customerEmail")) {
+      if (!bodyHas(customerBody, "customerEmail")) {
         customerEmail = "";
       }
-      if (!bodyHas(req.body, "customerAddress")) {
+      if (!bodyHas(customerBody, "customerAddress")) {
         customerAddress = "";
       }
-      if (!bodyHas(req.body, "customerReference")) {
+      if (!bodyHas(customerBody, "customerReference")) {
         customerReferenceLabel = "";
       }
     } else {
       const option = customerRefOption.option;
       customerOptionId = customerRefOption.optionId;
       // Typed values win over the stored snapshot; the option fills the blanks.
-      customerName = (bodyHas(req.body, "customerName") && customerName) ? customerName : option.name;
-      customerPhone = (bodyHas(req.body, "customerPhone") && customerPhone) ? customerPhone : (option.phone || "");
-      customerInstagram = (bodyHas(req.body, "customerInstagram") && customerInstagram)
+      customerName = (bodyHas(customerBody, "customerName") && customerName) ? customerName : option.name;
+      customerPhone = (bodyHas(customerBody, "customerPhone") && customerPhone) ? customerPhone : (option.phone || "");
+      customerInstagram = (bodyHas(customerBody, "customerInstagram") && customerInstagram)
         ? customerInstagram
         : normalizeInstagramHandle(option.instagram);
-      customerEmail = (bodyHas(req.body, "customerEmail") && customerEmail) ? customerEmail : (option.email || "");
-      customerAddress = (bodyHas(req.body, "customerAddress") && customerAddress) ? customerAddress : (option.address || "");
-      customerReferenceLabel = (bodyHas(req.body, "customerReference") && customerReferenceLabel)
+      customerEmail = (bodyHas(customerBody, "customerEmail") && customerEmail) ? customerEmail : (option.email || "");
+      customerAddress = (bodyHas(customerBody, "customerAddress") && customerAddress) ? customerAddress : (option.address || "");
+      customerReferenceLabel = (bodyHas(customerBody, "customerReference") && customerReferenceLabel)
         ? customerReferenceLabel
         : (option.reference || "");
 
@@ -1229,7 +1361,7 @@ export const update = asyncHandler(async (req, res) => {
     }
   }
 
-  if (!customerOptionId && (customerPhone || customerInstagram)) {
+  if (!b2b.isB2B && !customerOptionId && (customerPhone || customerInstagram)) {
     const customer = await linkOrCreateCustomer(req.accountId, {
       name: customerName,
       phone: customerPhone,
@@ -1310,7 +1442,7 @@ export const update = asyncHandler(async (req, res) => {
   const rawTaxRate = req.body.taxRate !== undefined ? Number(req.body.taxRate) : undefined;
   const taxRate = await resolveRefundTaxRate(req.accountId, refund.refundOf, rawTaxRate);
   const expense = roundMoney(manualExpense + inventory.inventoryCost);
-  const amounts = computeAmounts(income, expense, type, taxRate);
+  const amounts = computeAmounts(income, expense, type, taxRate, { taxExempt: b2b.taxExempt });
   const previousUsage = existing.inventoryUsage ? existing.inventoryUsage.map((item) => item.toObject ? item.toObject() : item) : [];
   await assertInventoryUsageAvailable(req.accountId, previousUsage, inventory.usage);
 
@@ -1328,6 +1460,10 @@ export const update = asyncHandler(async (req, res) => {
   existing.customerAddress = customerAddress;
   existing.customerReference = customerReferenceLabel;
   existing.customerOptionId = customerOptionId;
+  existing.isB2B = b2b.isB2B;
+  existing.businessOptionId = b2b.businessOptionId;
+  existing.businessName = b2b.businessName;
+  existing.taxExempt = b2b.taxExempt;
   existing.refundOf = refund.refundOf;
   existing.productServiceName = productServiceName;
   existing.productServiceType = productServiceType;

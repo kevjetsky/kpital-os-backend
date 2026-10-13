@@ -24,6 +24,17 @@ const entrySchema = new mongoose.Schema(
     customerAddress: { type: String, default: "", trim: true },
     customerReference: { type: String, default: "", trim: true },
     customerOptionId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    // B2B: this record was sold to (or refunded to) a saved business rather than
+    // a walk-in customer. businessOptionId points at that business; businessName
+    // is a snapshot so the record still names it after the business is deleted.
+    // The business also fills the customer* fields above, so every screen that
+    // shows "who paid" keeps working without knowing about B2B.
+    isB2B: { type: Boolean, default: false },
+    businessOptionId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    businessName: { type: String, default: "", trim: true },
+    // No sales tax is charged on this record (resale or exemption certificate).
+    // Only ever true on a B2B record.
+    taxExempt: { type: Boolean, default: false },
     productServiceName: { type: String, default: "", trim: true },
     productServiceType: {
       type: String,

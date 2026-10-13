@@ -9,7 +9,7 @@ const referenceOptionSchema = new mongoose.Schema(
     kind: {
       type: String,
       required: true,
-      enum: ["customer", "product_service"]
+      enum: ["customer", "product_service", "business"]
     },
     name: { type: String, required: true, trim: true },
     normalizedName: { type: String, required: true, trim: true },
@@ -27,6 +27,12 @@ const referenceOptionSchema = new mongoose.Schema(
     postalCode: { type: String, default: "", trim: true },
     reference: { type: String, default: "", trim: true },
     notes: { type: String, default: "", trim: true },
+    // Business (B2B account) only. contactName is the person to ask for at the
+    // store. taxExempt is the default for new records sold to this business, and
+    // taxExemptId is the resale/exemption certificate number that justifies it.
+    contactName: { type: String, default: "", trim: true },
+    taxExempt: { type: Boolean, default: false },
+    taxExemptId: { type: String, default: "", trim: true },
     optionType: {
       type: String,
       enum: ["", "product", "service"],

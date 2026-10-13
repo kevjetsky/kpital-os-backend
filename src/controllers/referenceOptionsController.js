@@ -17,12 +17,48 @@ import {
 } from "../utils.js";
 import { REFERENCE_OPTION_KINDS } from "../constants.js";
 
+// Business (B2B account) fields. Anything the request leaves out keeps the
+// stored value, so a partial update never blanks the rest of the profile.
+function readBusinessFields(body, existing = {}) {
+  const has = (field) => Object.prototype.hasOwnProperty.call(body || {}, field);
+  const text = (field) => (has(field) ? String(body[field] || "").trim() : (existing[field] || ""));
+  const addressPart = (field) => (has(field) ? normalizeAddressField(body[field]) : (existing[field] || ""));
+
+  const addressLine1 = addressPart("addressLine1");
+  const addressLine2 = addressPart("addressLine2");
+  const city = addressPart("city");
+  const state = addressPart("state");
+  const postalCode = addressPart("postalCode");
+  const phone = text("phone");
+
+  return {
+    contactName: text("contactName"),
+    phone,
+    phoneKey: normalizePhoneKey(phone),
+    email: text("email"),
+    addressLine1,
+    addressLine2,
+    city,
+    state,
+    postalCode,
+    address: formatCustomerAddress({ addressLine1, addressLine2, city, state, postalCode }) || text("address"),
+    taxExempt: has("taxExempt") ? Boolean(body.taxExempt) : Boolean(existing.taxExempt),
+    taxExemptId: text("taxExemptId"),
+    notes: text("notes")
+  };
+}
+
+function duplicateMessage(kind) {
+  return kind === "business" ? "A business with this name already exists." : "Reference option already exists.";
+}
+
 export const list = asyncHandler(async (req, res) => {
   const options = await ReferenceOption.find({ accountId: req.accountId })
     .sort({ kind: 1, name: 1 })
     .lean();
   const customers = [];
   const productServices = [];
+  const businesses = [];
 
   options.forEach((option) => {
     if (option.kind === "customer") {
@@ -32,16 +68,21 @@ export const list = asyncHandler(async (req, res) => {
 
     if (option.kind === "product_service") {
       productServices.push(serializeReferenceOption(option));
+      return;
+    }
+
+    if (option.kind === "business") {
+      businesses.push(serializeReferenceOption(option));
     }
   });
 
-  res.json({ customers, productServices });
+  res.json({ customers, productServices, businesses });
 });
 
 export const create = asyncHandler(async (req, res) => {
   const kind = String(req.body?.kind || "").trim();
   if (!REFERENCE_OPTION_KINDS.includes(kind)) {
-    return res.status(400).json({ message: "Kind must be customer or product_service." });
+    return res.status(400).json({ message: "Kind must be customer, product_service or business." });
   }
 
   let name = String(req.body?.name || "").trim();
@@ -113,6 +154,10 @@ export const create = asyncHandler(async (req, res) => {
     payload.notes = notes;
   }
 
+  if (kind === "business") {
+    Object.assign(payload, readBusinessFields(req.body));
+  }
+
   if (kind === "product_service") {
     const optionType = toProductServiceType(req.body?.optionType);
     if (!optionType) {
@@ -140,7 +185,7 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(201).json(serializeReferenceOption(created));
   } catch (error) {
     if (error?.code === 11000) {
-      return res.status(409).json({ message: "Reference option already exists." });
+      return res.status(409).json({ message: duplicateMessage(kind) });
     }
     throw error;
   }
@@ -210,6 +255,10 @@ export const update = asyncHandler(async (req, res) => {
     existing.address = formattedAddress || legacyAddress;
   }
 
+  if (existing.kind === "business") {
+    Object.assign(existing, readBusinessFields(req.body, existing));
+  }
+
   existing.name = name;
   existing.normalizedName = normalizeOptionName(name);
 
@@ -248,7 +297,7 @@ export const update = asyncHandler(async (req, res) => {
     return res.json(serializeReferenceOption(existing));
   } catch (error) {
     if (error?.code === 11000) {
-      return res.status(409).json({ message: "Reference option already exists." });
+      return res.status(409).json({ message: duplicateMessage(existing.kind) });
     }
     throw error;
   }
@@ -276,6 +325,15 @@ export const remove = asyncHandler(async (req, res) => {
     await Entry.updateMany(
       { accountId: req.accountId, productServiceOptionId: deleted._id },
       { $set: { productServiceOptionId: null } }
+    );
+  }
+
+  // Records sold to this business keep isB2B, the name snapshot and their tax
+  // treatment; only the link to the deleted profile goes.
+  if (deleted.kind === "business") {
+    await Entry.updateMany(
+      { accountId: req.accountId, businessOptionId: deleted._id },
+      { $set: { businessOptionId: null } }
     );
   }
 
