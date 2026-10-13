@@ -9,16 +9,18 @@ import {
   normalizeAddressField,
   normalizeInstagramHandle,
   normalizePhoneKey,
+  startOfUtcDay,
   formatCustomerAddress,
   toProductServiceType,
   serializeReferenceOption,
   deriveCustomerName,
   findCustomerByContact
 } from "../utils.js";
-import { REFERENCE_OPTION_KINDS } from "../constants.js";
+import { MAX_PAYMENT_TERMS_DAYS, REFERENCE_OPTION_KINDS } from "../constants.js";
 
 // Business (B2B account) fields. Anything the request leaves out keeps the
 // stored value, so a partial update never blanks the rest of the profile.
+// Returns { fields, error }.
 function readBusinessFields(body, existing = {}) {
   const has = (field) => Object.prototype.hasOwnProperty.call(body || {}, field);
   const text = (field) => (has(field) ? String(body[field] || "").trim() : (existing[field] || ""));
@@ -31,21 +33,56 @@ function readBusinessFields(body, existing = {}) {
   const postalCode = addressPart("postalCode");
   const phone = text("phone");
 
+  let paymentTermsDays = Number(existing.paymentTermsDays) || 0;
+  if (has("paymentTermsDays")) {
+    const raw = body.paymentTermsDays;
+    paymentTermsDays = raw === null || raw === "" ? 0 : Number(raw);
+    if (!Number.isInteger(paymentTermsDays) || paymentTermsDays < 0 || paymentTermsDays > MAX_PAYMENT_TERMS_DAYS) {
+      return { fields: null, error: `Payment terms must be a whole number of days from 0 to ${MAX_PAYMENT_TERMS_DAYS}.` };
+    }
+  }
+
+  let taxExemptExpiresAt = existing.taxExemptExpiresAt || null;
+  if (has("taxExemptExpiresAt")) {
+    const raw = body.taxExemptExpiresAt;
+    if (raw === null || String(raw).trim() === "") {
+      taxExemptExpiresAt = null;
+    } else {
+      const parsed = new Date(raw);
+      if (Number.isNaN(parsed.getTime())) {
+        return { fields: null, error: "Certificate expiry must be a valid date." };
+      }
+      taxExemptExpiresAt = startOfUtcDay(parsed);
+    }
+  }
+
   return {
-    contactName: text("contactName"),
-    phone,
-    phoneKey: normalizePhoneKey(phone),
-    email: text("email"),
-    addressLine1,
-    addressLine2,
-    city,
-    state,
-    postalCode,
-    address: formatCustomerAddress({ addressLine1, addressLine2, city, state, postalCode }) || text("address"),
-    taxExempt: has("taxExempt") ? Boolean(body.taxExempt) : Boolean(existing.taxExempt),
-    taxExemptId: text("taxExemptId"),
-    notes: text("notes")
+    error: null,
+    fields: {
+      contactName: text("contactName"),
+      phone,
+      phoneKey: normalizePhoneKey(phone),
+      email: text("email"),
+      addressLine1,
+      addressLine2,
+      city,
+      state,
+      postalCode,
+      address: formatCustomerAddress({ addressLine1, addressLine2, city, state, postalCode }) || text("address"),
+      taxExempt: has("taxExempt") ? Boolean(body.taxExempt) : Boolean(existing.taxExempt),
+      taxExemptId: text("taxExemptId"),
+      taxExemptExpiresAt,
+      paymentTermsDays,
+      notes: text("notes")
+    }
   };
+}
+
+// The wholesale price charged on B2B records. Blank or null clears it, which
+// puts B2B records back on the normal price. Returns { value, error }.
+function parseB2BPrice(raw) {
+  if (raw === null || raw === undefined || String(raw).trim() === "") return { value: null, error: null };
+  return parseMoneyInput(raw, "B2B price");
 }
 
 function duplicateMessage(kind) {
@@ -155,7 +192,11 @@ export const create = asyncHandler(async (req, res) => {
   }
 
   if (kind === "business") {
-    Object.assign(payload, readBusinessFields(req.body));
+    const business = readBusinessFields(req.body);
+    if (business.error) {
+      return res.status(400).json({ message: business.error });
+    }
+    Object.assign(payload, business.fields);
   }
 
   if (kind === "product_service") {
@@ -173,9 +214,15 @@ export const create = asyncHandler(async (req, res) => {
       return res.status(400).json({ message: parsedCost.error });
     }
 
+    const parsedB2BPrice = parseB2BPrice(req.body?.b2bPrice);
+    if (parsedB2BPrice.error) {
+      return res.status(400).json({ message: parsedB2BPrice.error });
+    }
+
     payload.optionType = optionType;
     payload.price = parsedPrice.value;
     payload.cost = parsedCost.value;
+    payload.b2bPrice = parsedB2BPrice.value;
   }
 
   payload.normalizedName = normalizeOptionName(payload.name);
@@ -256,7 +303,11 @@ export const update = asyncHandler(async (req, res) => {
   }
 
   if (existing.kind === "business") {
-    Object.assign(existing, readBusinessFields(req.body, existing));
+    const business = readBusinessFields(req.body, existing);
+    if (business.error) {
+      return res.status(400).json({ message: business.error });
+    }
+    Object.assign(existing, business.fields);
   }
 
   existing.name = name;
@@ -289,6 +340,14 @@ export const update = asyncHandler(async (req, res) => {
       existing.cost = parsedCost.value;
     } else {
       existing.cost = roundMoney(existing.cost || 0);
+    }
+
+    if (hasOwn("b2bPrice")) {
+      const parsedB2BPrice = parseB2BPrice(req.body?.b2bPrice);
+      if (parsedB2BPrice.error) {
+        return res.status(400).json({ message: parsedB2BPrice.error });
+      }
+      existing.b2bPrice = parsedB2BPrice.value;
     }
   }
 

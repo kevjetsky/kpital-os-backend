@@ -88,6 +88,32 @@ export function computeAmounts(income, expense, type = "", taxRate, { taxExempt 
   };
 }
 
+// Entries store date-only values at UTC midnight, so day arithmetic stays in UTC.
+export function startOfUtcDay(date) {
+  const d = new Date(date);
+  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+}
+
+export function addUtcDays(date, days) {
+  return new Date(startOfUtcDay(date).getTime() + days * 24 * 60 * 60 * 1000);
+}
+
+// Whether a business's tax-exempt certificate covers the given day. A business
+// that is not tax exempt is never covered; one with no expiry always is.
+export function isTaxExemptOn(business, date) {
+  if (!business?.taxExempt) return false;
+  if (!business.taxExemptExpiresAt) return true;
+  return startOfUtcDay(business.taxExemptExpiresAt).getTime() >= startOfUtcDay(date).getTime();
+}
+
+// The price a product/service sells for on a record: its B2B price on a B2B
+// record when it has one, otherwise the normal price.
+export function priceForRecord(option, isB2B) {
+  const b2bPrice = option?.b2bPrice;
+  if (isB2B && b2bPrice !== null && b2bPrice !== undefined) return roundMoney(b2bPrice);
+  return roundMoney(option?.price || 0);
+}
+
 export function parseOptionalObjectId(rawValue) {
   if (rawValue === undefined) {
     return undefined;
@@ -317,6 +343,8 @@ export function serializeReferenceOption(option) {
       postalCode,
       taxExempt: Boolean(option.taxExempt),
       taxExemptId: option.taxExemptId || "",
+      taxExemptExpiresAt: option.taxExemptExpiresAt || null,
+      paymentTermsDays: Number(option.paymentTermsDays) || 0,
       notes: option.notes || "",
       createdAt: option.createdAt || null,
       updatedAt: option.updatedAt || null
@@ -329,6 +357,7 @@ export function serializeReferenceOption(option) {
     optionType: toProductServiceType(option.optionType),
     price: roundMoney(option.price || 0),
     cost: roundMoney(option.cost || 0),
+    b2bPrice: option.b2bPrice === null || option.b2bPrice === undefined ? null : roundMoney(option.b2bPrice),
     createdAt: option.createdAt || null,
     updatedAt: option.updatedAt || null
   };

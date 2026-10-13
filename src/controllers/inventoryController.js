@@ -4,8 +4,15 @@ import { InventoryTransaction } from "../models/InventoryTransaction.js";
 import { asyncHandler, roundMoney, withTransaction } from "../utils.js";
 
 export const listItems = asyncHandler(async (req, res) => {
-  const { category, lowStock } = req.query;
+  const { category, lowStock, search } = req.query;
   const query = { accountId: req.accountId };
+
+  // Lets a part be found by a few typed words instead of scanning the full list.
+  const searchText = String(search || "").trim();
+  if (searchText) {
+    const searchRegex = new RegExp(searchText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    query.$or = [{ name: searchRegex }, { sku: searchRegex }, { supplier: searchRegex }, { category: searchRegex }];
+  }
 
   if (category) {
     query.category = String(category).trim();

@@ -33,13 +33,24 @@ const referenceOptionSchema = new mongoose.Schema(
     contactName: { type: String, default: "", trim: true },
     taxExempt: { type: Boolean, default: false },
     taxExemptId: { type: String, default: "", trim: true },
+    // When the certificate lapses. Null means it has no end date. Past this
+    // date new records stop defaulting to tax exempt.
+    taxExemptExpiresAt: { type: Date, default: null },
+    // Which expiry reminder was last pushed, as "<stage>:<expiry date>", so each
+    // stage ("soon", "expired") fires once per certificate date.
+    taxExemptReminder: { type: String, default: "" },
+    // Net payment terms in days (15 = net 15). 0 means no terms.
+    paymentTermsDays: { type: Number, default: 0 },
     optionType: {
       type: String,
       enum: ["", "product", "service"],
       default: ""
     },
     price: { type: Number, required: true, default: 0 },
-    cost: { type: Number, required: true, default: 0 }
+    cost: { type: Number, required: true, default: 0 },
+    // Product/service only: the wholesale price charged on B2B records. Null
+    // means there is none and B2B records use the normal price.
+    b2bPrice: { type: Number, default: null }
   },
   { timestamps: true }
 );

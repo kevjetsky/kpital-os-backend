@@ -26,7 +26,12 @@ import {
   deriveCustomerName,
   findCustomerByContact,
   toAccountObjectId,
-  withTransaction
+  withTransaction,
+  addUtcDays,
+  startOfUtcDay,
+  isTaxExemptOn,
+  priceForRecord,
+  serializeReferenceOption
 } from "../utils.js";
 import {
   ENTRY_TYPES,
@@ -35,6 +40,7 @@ import {
   PAYMENT_METHODS,
   CUSTOMER_REQUIRED_ENTRY_TYPES,
   B2B_ENTRY_TYPES,
+  MAX_PAYMENT_TERMS_DAYS,
   PROFIT_NEUTRAL_ENTRY_TYPES,
   DEFAULT_PAGE_SIZE,
   MAX_PAGE_SIZE,
@@ -236,14 +242,24 @@ async function resolveRefundOf(accountId, body, { type, selfId = null, existing 
 // means "no change", never "remove"; unticking isB2B is how a record leaves B2B.
 // That also keeps a record editable after its business was deleted: the link is
 // gone but the name snapshot still says who it was for.
-async function resolveB2BFields(accountId, body, { type, existing = null } = {}) {
-  const none = { isB2B: false, businessOptionId: null, businessName: "", taxExempt: false, business: null, error: null };
+async function resolveB2BFields(accountId, body, { type, date, existing = null } = {}) {
+  const none = {
+    isB2B: false,
+    businessOptionId: null,
+    businessName: "",
+    taxExempt: false,
+    paymentTermsDays: 0,
+    dueDate: null,
+    business: null,
+    error: null
+  };
 
   const isB2B = bodyHas(body, "isB2B") ? Boolean(body.isB2B) : Boolean(existing?.isB2B);
   if (!isB2B || !B2B_ENTRY_TYPES.includes(type)) return none;
 
   const wasB2B = Boolean(existing?.isB2B);
-  let businessOptionId = wasB2B && existing.businessOptionId ? String(existing.businessOptionId) : null;
+  const previousBusinessId = wasB2B && existing.businessOptionId ? String(existing.businessOptionId) : null;
+  let businessOptionId = previousBusinessId;
   let businessName = wasB2B ? existing.businessName || "" : "";
   let business = null;
 
@@ -261,13 +277,40 @@ async function resolveB2BFields(accountId, body, { type, existing = null } = {})
     return { ...none, error: "Choose the business this B2B record is for." };
   }
 
-  // Unless the request says otherwise, a record keeps its own tax treatment, and
-  // a record that is only now becoming B2B takes the business's default.
+  // Unless the request says otherwise, a record keeps its own tax treatment and
+  // terms. A record that is only now becoming B2B, or is moving to a different
+  // business, takes that business's defaults instead.
+  const takesDefaults = !wasB2B || (Boolean(business) && businessOptionId !== previousBusinessId);
+
+  // An expired certificate no longer exempts anything, so the default follows
+  // the certificate as of the record's own date. Ticking it by hand still works.
   const taxExempt = bodyHas(body, "taxExempt")
     ? Boolean(body.taxExempt)
-    : wasB2B ? Boolean(existing.taxExempt) : Boolean(business?.taxExempt);
+    : takesDefaults ? isTaxExemptOn(business, date) : Boolean(existing.taxExempt);
 
-  return { isB2B: true, businessOptionId, businessName, taxExempt, business, error: null };
+  let paymentTermsDays = takesDefaults ? Number(business?.paymentTermsDays) || 0 : Number(existing.paymentTermsDays) || 0;
+  if (bodyHas(body, "paymentTermsDays")) {
+    const raw = body.paymentTermsDays;
+    paymentTermsDays = raw === null || raw === "" ? 0 : Number(raw);
+    if (!Number.isInteger(paymentTermsDays) || paymentTermsDays < 0 || paymentTermsDays > MAX_PAYMENT_TERMS_DAYS) {
+      return {
+        ...none,
+        error: `Payment terms must be a whole number of days from 0 to ${MAX_PAYMENT_TERMS_DAYS}.`
+      };
+    }
+  }
+
+  return {
+    isB2B: true,
+    businessOptionId,
+    businessName,
+    taxExempt,
+    paymentTermsDays,
+    // No terms means no due date, so the record is never flagged overdue.
+    dueDate: paymentTermsDays > 0 ? addUtcDays(date, paymentTermsDays) : null,
+    business,
+    error: null
+  };
 }
 
 // On a B2B record the business is the customer: its details fill the customer
@@ -435,9 +478,112 @@ async function attachRefundLinks(accountId, entries) {
   return entries;
 }
 
+// A record is overdue once its due date has passed and it has not been paid.
+// Refunds hand money back, so they are never owed.
+function overdueFilter(now = new Date()) {
+  return {
+    dueDate: { $ne: null, $lt: startOfUtcDay(now) },
+    status: { $ne: "Paid" },
+    type: { $ne: "Refund" }
+  };
+}
+
+// What the customer was billed and still owes on one record, tax on top.
+function billingFor(entry, now = new Date()) {
+  const isRefund = entry.type === "Refund";
+  const subtotal = roundMoney(isRefund ? -(entry.expense || 0) : entry.income || 0);
+  const salesTax = roundMoney(entry.salesTax || 0);
+  const total = roundMoney(subtotal + salesTax);
+  const payments = roundMoney((entry.payments || []).reduce((sum, payment) => sum + (payment.amount || 0), 0));
+  // Marking a record Paid settles it even when no payment lines were logged.
+  const settled = isRefund || entry.status === "Paid";
+  const balance = settled ? 0 : roundMoney(Math.max(0, total - payments));
+  const paid = isRefund ? 0 : entry.status === "Paid" ? total : roundMoney(Math.min(payments, total));
+  const overdue = balance > 0 && Boolean(entry.dueDate) && new Date(entry.dueDate) < startOfUtcDay(now);
+  return { subtotal, salesTax, total, paid, balance, overdue };
+}
+
+// GET /api/entries/business-statement?businessOptionId[&from&to&unpaidOnly]
+// One business's B2B records as a single statement: every record in the range
+// (or only the unpaid ones) with what was billed, paid and is still owed. The
+// dashboard prints this as one invoice for several jobs, and the MCP reads it
+// to answer "what does this store owe?".
+export const businessStatement = asyncHandler(async (req, res) => {
+  const { businessOptionId, from, to, unpaidOnly } = req.query;
+
+  const businessId = String(businessOptionId || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(businessId)) {
+    return res.status(400).json({ message: "A valid businessOptionId is required." });
+  }
+  const business = await ReferenceOption.findOne({ _id: businessId, accountId: req.accountId, kind: "business" }).lean();
+  if (!business) {
+    return res.status(404).json({ message: "Business not found." });
+  }
+
+  const query = { accountId: req.accountId, isB2B: true, businessOptionId: businessId };
+  const range = {};
+  for (const [key, raw] of [["from", from], ["to", to]]) {
+    if (!raw) continue;
+    const parsed = new Date(String(raw));
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ message: `Invalid ${key} date.` });
+    }
+    // `to` is inclusive: everything up to the end of that day.
+    if (key === "from") range.$gte = startOfUtcDay(parsed);
+    else range.$lt = addUtcDays(parsed, 1);
+  }
+  if (Object.keys(range).length > 0) query.date = range;
+
+  const onlyUnpaid = ["true", "1"].includes(String(unpaidOnly || "").toLowerCase());
+  if (onlyUnpaid) {
+    query.status = { $ne: "Paid" };
+    query.type = { $ne: "Refund" };
+  }
+
+  const now = new Date();
+  const entries = await Entry.find(query).sort({ date: 1, createdAt: 1 }).lean();
+  const totals = { count: entries.length, subtotal: 0, salesTax: 0, total: 0, paid: 0, balance: 0, overdue: 0 };
+  const lines = entries.map((entry) => {
+    const billing = billingFor(entry, now);
+    totals.subtotal = roundMoney(totals.subtotal + billing.subtotal);
+    totals.salesTax = roundMoney(totals.salesTax + billing.salesTax);
+    totals.total = roundMoney(totals.total + billing.total);
+    totals.paid = roundMoney(totals.paid + billing.paid);
+    totals.balance = roundMoney(totals.balance + billing.balance);
+    if (billing.overdue) totals.overdue = roundMoney(totals.overdue + billing.balance);
+    return {
+      _id: String(entry._id),
+      date: entry.date,
+      type: entry.type,
+      status: entry.status,
+      description: entry.description || entry.productServiceName || entry.type,
+      taxExempt: Boolean(entry.taxExempt),
+      paymentTermsDays: Number(entry.paymentTermsDays) || 0,
+      dueDate: entry.dueDate || null,
+      ...billing
+    };
+  });
+
+  return res.json({
+    business: serializeReferenceOption(business),
+    from: range.$gte || null,
+    to: to ? startOfUtcDay(new Date(String(to))) : null,
+    unpaidOnly: onlyUnpaid,
+    generatedAt: now,
+    lines,
+    totals
+  });
+});
+
 export const list = asyncHandler(async (req, res) => {
-  const { type, status, page, limit, search, callbacks, b2b, businessOptionId } = req.query;
+  const { type, status, page, limit, search, callbacks, b2b, businessOptionId, overdue } = req.query;
   const query = { accountId: req.accountId };
+
+  // Combined with $and so it narrows, rather than replaces, a type or status
+  // filter given alongside it.
+  if (["true", "1"].includes(String(overdue || "").toLowerCase())) {
+    query.$and = Object.entries(overdueFilter()).map(([field, condition]) => ({ [field]: condition }));
+  }
 
   if (b2b !== undefined) {
     const flag = String(b2b).toLowerCase();
@@ -928,7 +1074,7 @@ export const create = asyncHandler(async (req, res) => {
   const rawCategory = String(body.category || "").trim();
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
 
-  const b2b = await resolveB2BFields(req.accountId, body, { type });
+  const b2b = await resolveB2BFields(req.accountId, body, { type, date });
   if (b2b.error) {
     return res.status(400).json({ message: b2b.error });
   }
@@ -1050,7 +1196,7 @@ export const create = asyncHandler(async (req, res) => {
   if (productServiceReference.option) {
     productServiceName = productServiceReference.option.name;
     productServiceType = toProductServiceType(productServiceReference.option.optionType);
-    productServicePrice = roundMoney(productServiceReference.option.price || 0);
+    productServicePrice = priceForRecord(productServiceReference.option, b2b.isB2B);
     productServiceOptionId = productServiceReference.optionId;
   }
 
@@ -1114,6 +1260,8 @@ export const create = asyncHandler(async (req, res) => {
     businessOptionId: b2b.businessOptionId,
     businessName: b2b.businessName,
     taxExempt: b2b.taxExempt,
+    paymentTermsDays: b2b.paymentTermsDays,
+    dueDate: b2b.dueDate,
     paymentMethod,
     productServiceName,
     productServiceType,
@@ -1187,8 +1335,23 @@ export const update = asyncHandler(async (req, res) => {
 
   const income = parsedIncome.value;
   const manualExpense = parsedExpense.value;
-  const inventory = bodyHas(req.body, "inventoryUsage")
-    ? await normalizeInventoryUsage(req.accountId, req.body.inventoryUsage)
+  // inventoryUsage replaces the parts on the record; addInventoryUsage adds to
+  // them, so a caller that only knows the new part does not have to send the
+  // whole list back (and cannot drop the others by leaving them out).
+  let inventoryInput;
+  if (bodyHas(req.body, "inventoryUsage")) {
+    inventoryInput = req.body.inventoryUsage;
+  } else if (bodyHas(req.body, "addInventoryUsage")) {
+    if (!Array.isArray(req.body.addInventoryUsage)) {
+      return res.status(400).json({ message: "addInventoryUsage must be a list of { itemId, quantity }." });
+    }
+    inventoryInput = [
+      ...(existing.inventoryUsage || []).map((item) => ({ itemId: String(item.itemId), quantity: item.quantity })),
+      ...req.body.addInventoryUsage
+    ];
+  }
+  const inventory = inventoryInput !== undefined
+    ? await normalizeInventoryUsage(req.accountId, inventoryInput)
     : {
         usage: existing.inventoryUsage || [],
         inventoryCost: Number(existing.inventoryCost || 0),
@@ -1214,7 +1377,7 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: callback.error });
   }
 
-  const b2b = await resolveB2BFields(req.accountId, req.body, { type, existing });
+  const b2b = await resolveB2BFields(req.accountId, req.body, { type, date, existing });
   if (b2b.error) {
     return res.status(400).json({ message: b2b.error });
   }
@@ -1413,7 +1576,7 @@ export const update = asyncHandler(async (req, res) => {
       productServiceOptionId = productServiceReference.optionId;
       productServiceName = productServiceReference.option.name;
       productServiceType = toProductServiceType(productServiceReference.option.optionType);
-      productServicePrice = roundMoney(productServiceReference.option.price || 0);
+      productServicePrice = priceForRecord(productServiceReference.option, b2b.isB2B);
     }
   }
 
@@ -1464,6 +1627,12 @@ export const update = asyncHandler(async (req, res) => {
   existing.businessOptionId = b2b.businessOptionId;
   existing.businessName = b2b.businessName;
   existing.taxExempt = b2b.taxExempt;
+  existing.paymentTermsDays = b2b.paymentTermsDays;
+  // A new due date is a new deadline, so it earns its own overdue reminder.
+  if (String(existing.dueDate || "") !== String(b2b.dueDate || "")) {
+    existing.overdueNotified = false;
+  }
+  existing.dueDate = b2b.dueDate;
   existing.refundOf = refund.refundOf;
   existing.productServiceName = productServiceName;
   existing.productServiceType = productServiceType;

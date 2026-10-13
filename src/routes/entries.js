@@ -10,6 +10,7 @@ router.get("/summary", requireAuth, entries.summary);
 router.get("/warranty-candidates", requireAuth, entries.warrantyCandidates);
 router.get("/refund-candidates", requireAuth, entries.refundCandidates);
 router.get("/callback-stats", requireAuth, entries.callbackStats);
+router.get("/business-statement", requireAuth, entries.businessStatement);
 router.post("/", requireAuth, entries.create);
 router.put("/:id", requireAuth, entries.update);
 router.delete("/:id", requireAuth, entries.remove);

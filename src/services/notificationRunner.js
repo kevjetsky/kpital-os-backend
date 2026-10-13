@@ -1,8 +1,9 @@
 import { Entry } from "../models/Entry.js";
 import { InventoryItem } from "../models/InventoryItem.js";
 import { PushSubscription } from "../models/PushSubscription.js";
+import { ReferenceOption } from "../models/ReferenceOption.js";
 import { Settings } from "../models/Settings.js";
-import { PROFIT_NEUTRAL_ENTRY_TYPES } from "../constants.js";
+import { CERT_EXPIRY_WARNING_DAYS, PROFIT_NEUTRAL_ENTRY_TYPES } from "../constants.js";
 import { roundMoney, toAccountObjectId } from "../utils.js";
 import { sendToAccount } from "./notificationService.js";
 import { getQuarterOwed, periodLabel, quarterOfDate } from "./taxService.js";
@@ -128,6 +129,97 @@ async function runWeeklySummary(accountId, settings, prefs, now, results) {
   await settings.save();
 }
 
+const shortDate = (date) =>
+  new Date(date).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+
+// Warn before a business's tax-exempt certificate lapses, and again once it
+// has. Each stage fires once per certificate date: the marker stored on the
+// business names the stage and the date, so entering a renewed date re-arms it.
+async function runCertExpiry(accountId, prefs, now, results) {
+  if (prefs.certExpiry === false) return;
+
+  const today = startOfUtcDay(now);
+  const businesses = await ReferenceOption.find({
+    accountId,
+    kind: "business",
+    taxExempt: true,
+    taxExemptExpiresAt: { $ne: null }
+  }).lean();
+
+  const due = [];
+  for (const business of businesses) {
+    const expires = startOfUtcDay(business.taxExemptExpiresAt);
+    const daysLeft = Math.round((expires.getTime() - today.getTime()) / DAY_MS);
+    const stage = daysLeft < 0 ? "expired" : daysLeft <= CERT_EXPIRY_WARNING_DAYS ? "soon" : "";
+    if (!stage) continue;
+    const marker = `${stage}:${expires.toISOString().slice(0, 10)}`;
+    if (business.taxExemptReminder === marker) continue;
+    due.push({ business, stage, daysLeft, expires, marker });
+  }
+  if (due.length === 0) return;
+
+  const describe = ({ business, stage, daysLeft, expires }) =>
+    stage === "expired"
+      ? `${business.name}'s certificate expired ${shortDate(expires)}`
+      : `${business.name}'s certificate expires ${daysLeft === 0 ? "today" : `in ${daysLeft} day${daysLeft === 1 ? "" : "s"}`} (${shortDate(expires)})`;
+  const anyExpired = due.some((item) => item.stage === "expired");
+  const body = `${due.map(describe).join("; ")}.${
+    anyExpired ? " New records for an expired certificate charge sales tax until it is renewed." : ""
+  }`;
+  const push = await sendToAccount(accountId, {
+    title: "Tax-exempt certificate",
+    body,
+    url: "/?tab=b2b",
+    tag: "cert-expiry"
+  });
+
+  for (const item of due) {
+    await ReferenceOption.updateOne(
+      { _id: item.business._id, accountId },
+      { $set: { taxExemptReminder: item.marker } }
+    );
+  }
+  results.certExpiry = { alerted: due.length, expired: due.filter((item) => item.stage === "expired").length, push };
+}
+
+// Tell the owner once when a B2B record on payment terms goes past its due date
+// unpaid. overdueNotified keeps it to the transition, like the low-stock flag.
+async function runOverdueInvoices(accountId, prefs, now, results) {
+  if (prefs.overdueInvoices === false) return;
+
+  const entries = await Entry.find({
+    accountId,
+    isB2B: true,
+    dueDate: { $ne: null, $lt: startOfUtcDay(now) },
+    status: { $ne: "Paid" },
+    type: { $ne: "Refund" },
+    overdueNotified: { $ne: true }
+  }).lean();
+  if (entries.length === 0) return;
+
+  const owedByBusiness = new Map();
+  let total = 0;
+  for (const entry of entries) {
+    const paid = (entry.payments || []).reduce((sum, payment) => sum + (payment.amount || 0), 0);
+    const owed = Math.max(0, roundMoney((entry.income || 0) + (entry.salesTax || 0) - paid));
+    const name = entry.businessName || "Unknown business";
+    owedByBusiness.set(name, roundMoney((owedByBusiness.get(name) || 0) + owed));
+    total = roundMoney(total + owed);
+  }
+
+  const breakdown = Array.from(owedByBusiness.entries())
+    .map(([name, owed]) => `${name} ${money(owed)}`)
+    .join(", ");
+  const body = `${entries.length} B2B record${entries.length === 1 ? " is" : "s are"} now past due, ${money(total)} in total: ${breakdown}.`;
+  const push = await sendToAccount(accountId, { title: "Payment overdue", body, url: "/?tab=b2b", tag: "overdue-invoices" });
+
+  await Entry.updateMany(
+    { accountId, _id: { $in: entries.map((entry) => entry._id) } },
+    { $set: { overdueNotified: true } }
+  );
+  results.overdueInvoices = { alerted: entries.length, total, push };
+}
+
 // Entry point for the daily notifications cron. Evaluates every trigger and
 // returns a summary of what fired.
 export async function runNotifications(now = new Date()) {
@@ -157,6 +249,8 @@ export async function runNotifications(now = new Date()) {
     await runLowStock(accountId, prefs, results);
     await runQuarterlyTax(accountId, settings, prefs, now, results);
     await runWeeklySummary(accountId, settings, prefs, now, results);
+    await runCertExpiry(accountId, prefs, now, results);
+    await runOverdueInvoices(accountId, prefs, now, results);
 
     byAccount[String(accountId)] = results;
   }

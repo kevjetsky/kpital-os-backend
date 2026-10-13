@@ -6,6 +6,9 @@ import bcrypt from "bcryptjs";
 import app from "../app.js";
 import { Settings } from "../models/Settings.js";
 import { ReferenceOption } from "../models/ReferenceOption.js";
+import { Entry } from "../models/Entry.js";
+import { PushSubscription } from "../models/PushSubscription.js";
+import { runNotifications } from "../services/notificationRunner.js";
 
 let mongod;
 let token;
@@ -344,3 +347,308 @@ describe("B2B records", () => {
     expect(summary.body.range).toMatchObject({ income: 300, salesTax: 16.5, net: 300 });
   });
 });
+
+const isoDay = (date) => new Date(date).toISOString().slice(0, 10);
+const daysFromToday = (days) => isoDay(Date.now() + days * 24 * 60 * 60 * 1000);
+
+describe("payment terms", () => {
+  it("gives a B2B record the business's terms and a due date, and none without terms", async () => {
+    const net15 = await createBusiness({ paymentTermsDays: 15 });
+    const noTerms = await createBusiness({ name: "Corner Pawn", paymentTermsDays: 0 });
+    expect(net15.paymentTermsDays).toBe(15);
+
+    const onTerms = (await postEntry(b2bRepair(net15))).body;
+    expect(onTerms.paymentTermsDays).toBe(15);
+    expect(isoDay(onTerms.dueDate)).toBe("2026-10-16");
+
+    expect((await postEntry(b2bRepair(noTerms))).body).toMatchObject({ paymentTermsDays: 0, dueDate: null });
+
+    // The record can set its own terms, and a walk-in record never has any.
+    const custom = (await postEntry(b2bRepair(net15, { paymentTermsDays: 30 }))).body;
+    expect(isoDay(custom.dueDate)).toBe("2026-10-31");
+    const walkIn = await postEntry({
+      type: "Repair",
+      date: "2026-10-01",
+      description: "HDMI port",
+      income: 100,
+      customerPhone: "555-0101",
+      paymentTermsDays: 30
+    });
+    expect(walkIn.body).toMatchObject({ paymentTermsDays: 0, dueDate: null });
+
+    expect((await postEntry(b2bRepair(net15, { paymentTermsDays: 1.5 }))).status).toBe(400);
+    expect((await postEntry(b2bRepair(net15, { paymentTermsDays: 999 }))).status).toBe(400);
+    const badBusiness = await authed(request(app).post("/api/reference-options")).send({ kind: "business", name: "Bad Terms", paymentTermsDays: -1 });
+    expect(badBusiness.status).toBe(400);
+  });
+
+  it("keeps a record's terms when the business changes its own, and moves the due date with the record date", async () => {
+    const business = await createBusiness({ paymentTermsDays: 15 });
+    const entry = (await postEntry(b2bRepair(business))).body;
+
+    await authed(request(app).put(`/api/reference-options/${business._id}`)).send({ paymentTermsDays: 60 });
+
+    const moved = await putEntry(entry._id, { date: "2026-10-10" });
+    expect(moved.body.paymentTermsDays).toBe(15);
+    expect(isoDay(moved.body.dueDate)).toBe("2026-10-25");
+
+    // Moving the record to another business takes that business's terms.
+    const other = await createBusiness({ name: "Corner Pawn", paymentTermsDays: 7, taxExempt: false });
+    const switched = await putEntry(entry._id, { businessOptionId: other._id });
+    expect(switched.body).toMatchObject({ paymentTermsDays: 7, taxExempt: false, salesTax: 8.25 });
+    expect(isoDay(switched.body.dueDate)).toBe("2026-10-17");
+
+    const cleared = await putEntry(entry._id, { paymentTermsDays: 0 });
+    expect(cleared.body.dueDate).toBeNull();
+  });
+
+  it("lists what is overdue: past due and still unpaid", async () => {
+    const business = await createBusiness({ paymentTermsDays: 15 });
+    const late = (await postEntry(b2bRepair(business, { date: daysFromToday(-40), description: "Late" }))).body;
+    await postEntry(b2bRepair(business, { date: daysFromToday(-40), description: "Settled", status: "Paid", paymentMethod: "Zelle" }));
+    await postEntry(b2bRepair(business, { date: daysFromToday(-2), description: "Not due yet" }));
+
+    const overdue = await authed(request(app).get("/api/entries?overdue=true"));
+    expect(overdue.body.map((e) => e.description)).toEqual(["Late"]);
+    expect((await authed(request(app).get("/api/entries?overdue=true&type=Sales"))).body).toEqual([]);
+
+    await putEntry(late._id, { status: "Paid", paymentMethod: "Cash" });
+    expect((await authed(request(app).get("/api/entries?overdue=true"))).body).toEqual([]);
+  });
+});
+
+describe("certificate expiry", () => {
+  it("stops defaulting to tax exempt once the certificate has lapsed on the record's date", async () => {
+    const business = await createBusiness({ taxExemptExpiresAt: "2026-10-15" });
+    expect(isoDay(business.taxExemptExpiresAt)).toBe("2026-10-15");
+
+    expect((await postEntry(b2bRepair(business, { date: "2026-10-15" }))).body).toMatchObject({ taxExempt: true, salesTax: 0 });
+    expect((await postEntry(b2bRepair(business, { date: "2026-10-16" }))).body).toMatchObject({ taxExempt: false, salesTax: 8.25 });
+    // Ticking it by hand is still the owner's call.
+    expect((await postEntry(b2bRepair(business, { date: "2026-10-16", taxExempt: true }))).body.salesTax).toBe(0);
+
+    const cleared = await authed(request(app).put(`/api/reference-options/${business._id}`)).send({ taxExemptExpiresAt: "" });
+    expect(cleared.body.taxExemptExpiresAt).toBeNull();
+    expect((await postEntry(b2bRepair(business, { date: "2027-01-01" }))).body.taxExempt).toBe(true);
+
+    const bad = await authed(request(app).put(`/api/reference-options/${business._id}`)).send({ taxExemptExpiresAt: "soon" });
+    expect(bad.status).toBe(400);
+  });
+});
+
+describe("B2B pricing", () => {
+  it("stores a wholesale price on a product and snapshots it on B2B records only", async () => {
+    const business = await createBusiness();
+    const product = await authed(request(app).post("/api/reference-options")).send({
+      kind: "product_service",
+      name: "Stick replacement",
+      optionType: "service",
+      price: 60,
+      cost: 8,
+      b2bPrice: 40
+    });
+    expect(product.status).toBe(201);
+    expect(product.body.b2bPrice).toBe(40);
+
+    const b2b = await postEntry(b2bRepair(business, { productServiceOptionId: product.body._id, income: 40 }));
+    expect(b2b.body.productServicePrice).toBe(40);
+
+    const walkIn = await postEntry({
+      type: "Repair",
+      date: "2026-10-01",
+      income: 60,
+      customerPhone: "555-0101",
+      productServiceOptionId: product.body._id
+    });
+    expect(walkIn.body.productServicePrice).toBe(60);
+
+    // Clearing it puts B2B records back on the normal price.
+    const cleared = await authed(request(app).put(`/api/reference-options/${product.body._id}`)).send({ b2bPrice: null });
+    expect(cleared.body).toMatchObject({ b2bPrice: null, price: 60 });
+    const after = await postEntry(b2bRepair(business, { productServiceOptionId: product.body._id }));
+    expect(after.body.productServicePrice).toBe(60);
+
+    const plain = await authed(request(app).post("/api/reference-options")).send({
+      kind: "product_service", name: "HDMI port", optionType: "service", price: 120
+    });
+    expect(plain.body.b2bPrice).toBeNull();
+    const bad = await authed(request(app).put(`/api/reference-options/${product.body._id}`)).send({ b2bPrice: -5 });
+    expect(bad.status).toBe(400);
+  });
+});
+
+describe("business statement", () => {
+  it("lists a business's records with what was billed, paid and is still owed", async () => {
+    const business = await createBusiness({ taxExempt: false, paymentTermsDays: 15 });
+    const other = await createBusiness({ name: "Corner Pawn" });
+
+    const late = (await postEntry(b2bRepair(business, { date: daysFromToday(-40), description: "Late job", income: 100 }))).body;
+    await authed(request(app).post(`/api/entries/${late._id}/payments`)).send({ amount: 50, date: daysFromToday(-30), method: "Zelle" });
+    await postEntry(b2bRepair(business, { date: daysFromToday(-3), description: "Paid job", income: 200, status: "Paid", paymentMethod: "Cash" }));
+    await postEntry(b2bRepair(business, { date: daysFromToday(-1), description: "Exempt job", income: 40, taxExempt: true }));
+    await postEntry({ type: "Refund", date: daysFromToday(-1), description: "Refund", expense: 20, isB2B: true, businessOptionId: business._id });
+    await postEntry(b2bRepair(other, { description: "Someone else's" }));
+
+    const all = await authed(request(app).get(`/api/entries/business-statement?businessOptionId=${business._id}`));
+    expect(all.status).toBe(200);
+    expect(all.body.business.name).toBe("GameStop #4821");
+    expect(all.body.lines.map((line) => line.description)).toEqual(["Late job", "Paid job", "Exempt job", "Refund"]);
+    expect(all.body.lines[0]).toMatchObject({ subtotal: 100, salesTax: 8.25, total: 108.25, paid: 50, balance: 58.25, overdue: true });
+    expect(all.body.lines[1]).toMatchObject({ total: 216.5, paid: 216.5, balance: 0, overdue: false });
+    expect(all.body.lines[2]).toMatchObject({ taxExempt: true, salesTax: 0, total: 40, balance: 40, overdue: false });
+    expect(all.body.lines[3]).toMatchObject({ subtotal: -20, salesTax: -1.65, total: -21.65, balance: 0 });
+    expect(all.body.totals).toMatchObject({ count: 4, subtotal: 320, total: 343.1, paid: 266.5, balance: 98.25, overdue: 58.25 });
+
+    const unpaid = await authed(
+      request(app).get(`/api/entries/business-statement?businessOptionId=${business._id}&unpaidOnly=true`)
+    );
+    expect(unpaid.body.lines.map((line) => line.description)).toEqual(["Late job", "Exempt job"]);
+    expect(unpaid.body.totals.balance).toBe(98.25);
+
+    const recent = await authed(
+      request(app).get(
+        `/api/entries/business-statement?businessOptionId=${business._id}&from=${daysFromToday(-3)}&to=${daysFromToday(-3)}`
+      )
+    );
+    expect(recent.body.lines.map((line) => line.description)).toEqual(["Paid job"]);
+
+    expect((await authed(request(app).get("/api/entries/business-statement"))).status).toBe(400);
+    expect(
+      (await authed(request(app).get(`/api/entries/business-statement?businessOptionId=${new mongoose.Types.ObjectId()}`))).status
+    ).toBe(404);
+    expect(
+      (await authed(request(app).get(`/api/entries/business-statement?businessOptionId=${business._id}&from=nope`))).status
+    ).toBe(400);
+  });
+});
+
+describe("parts on a record", () => {
+  async function createPart(overrides = {}) {
+    const res = await authed(request(app).post("/api/inventory")).send({
+      name: "DualSense stick module",
+      sku: "DS-STICK",
+      category: "Sticks",
+      quantity: 10,
+      costPerUnit: 4,
+      ...overrides
+    });
+    expect(res.status).toBe(201);
+    return res.body;
+  }
+  const stock = async (id) => (await authed(request(app).get(`/api/inventory/${id}`))).body.quantity;
+
+  it("adds parts to a record without resending the ones already on it", async () => {
+    const sticks = await createPart();
+    const ports = await createPart({ name: "HDMI port", sku: "HDMI-1", category: "HDMI Ports", costPerUnit: 6 });
+
+    const entry = (await postEntry({
+      type: "Repair",
+      date: "2026-10-01",
+      description: "Stick repair",
+      income: 100,
+      expense: 5,
+      customerPhone: "555-0101",
+      inventoryUsage: [{ itemId: sticks._id, quantity: 1 }]
+    })).body;
+    expect(entry).toMatchObject({ inventoryCost: 4, expense: 9, netProfit: 91 });
+    expect(await stock(sticks._id)).toBe(9);
+
+    const added = await putEntry(entry._id, {
+      addInventoryUsage: [{ itemId: sticks._id, quantity: 1 }, { itemId: ports._id, quantity: 2 }]
+    });
+    expect(added.status).toBe(200);
+    const usage = Object.fromEntries(added.body.inventoryUsage.map((u) => [u.sku, u.quantity]));
+    expect(usage).toEqual({ "DS-STICK": 2, "HDMI-1": 2 });
+    // 2 sticks at $4 and 2 ports at $6, on top of the $5 typed by hand.
+    expect(added.body).toMatchObject({ inventoryCost: 20, expense: 25, netProfit: 75 });
+    expect(await stock(sticks._id)).toBe(8);
+    expect(await stock(ports._id)).toBe(8);
+
+    // Sending the full list still replaces it, and puts the rest back in stock.
+    const replaced = await putEntry(entry._id, { inventoryUsage: [{ itemId: ports._id, quantity: 1 }] });
+    expect(replaced.body).toMatchObject({ inventoryCost: 6, expense: 11 });
+    expect(await stock(sticks._id)).toBe(10);
+    expect(await stock(ports._id)).toBe(9);
+  });
+
+  it("refuses parts that are not in stock or do not exist, and changes nothing", async () => {
+    const sticks = await createPart({ quantity: 1 });
+    const entry = (await postEntry({
+      type: "Repair", date: "2026-10-01", description: "Stick repair", income: 100, customerPhone: "555-0101"
+    })).body;
+
+    const tooMany = await putEntry(entry._id, { addInventoryUsage: [{ itemId: sticks._id, quantity: 2 }] });
+    expect(tooMany.status).toBe(400);
+    expect(tooMany.body.message).toMatch(/not enough stock/i);
+    expect((await putEntry(entry._id, { addInventoryUsage: [{ itemId: String(new mongoose.Types.ObjectId()), quantity: 1 }] })).status).toBe(400);
+    expect((await putEntry(entry._id, { addInventoryUsage: "sticks" })).status).toBe(400);
+    expect(await stock(sticks._id)).toBe(1);
+  });
+
+  it("finds parts by name, SKU or category", async () => {
+    await createPart();
+    await createPart({ name: "HDMI port", sku: "HDMI-1", category: "HDMI Ports" });
+
+    const names = async (search) =>
+      (await authed(request(app).get(`/api/inventory?search=${encodeURIComponent(search)}`))).body.map((item) => item.sku);
+    expect(await names("stick")).toEqual(["DS-STICK"]);
+    expect(await names("hdmi-1")).toEqual(["HDMI-1"]);
+    expect(await names("ports")).toEqual(["HDMI-1"]);
+    expect(await names("(")).toEqual([]);
+    expect((await authed(request(app).get("/api/inventory"))).body).toHaveLength(2);
+  });
+});
+
+describe("B2B reminders", () => {
+  async function subscribe() {
+    const account = await Settings.findOne({ email: "owner@example.com" });
+    await PushSubscription.create({
+      accountId: account._id,
+      endpoint: "https://push.example/device-1",
+      keys: { p256dh: "key", auth: "auth" }
+    });
+    return String(account._id);
+  }
+
+  it("warns once before a certificate lapses, once after, and again for a renewed date", async () => {
+    const accountId = await subscribe();
+    const soon = await createBusiness({ taxExemptExpiresAt: daysFromToday(10) });
+    await createBusiness({ name: "Far Off", taxExemptExpiresAt: daysFromToday(200) });
+    await createBusiness({ name: "No Date" });
+    await createBusiness({ name: "Not Exempt", taxExempt: false, taxExemptExpiresAt: daysFromToday(5) });
+
+    const first = await runNotifications(new Date());
+    expect(first.accounts[accountId].certExpiry).toMatchObject({ alerted: 1, expired: 0 });
+    expect((await runNotifications(new Date())).accounts[accountId].certExpiry).toBeUndefined();
+
+    // Eleven days on the same certificate has expired: a new stage, so it speaks again.
+    const later = new Date(Date.now() + 11 * 24 * 60 * 60 * 1000);
+    expect((await runNotifications(later)).accounts[accountId].certExpiry).toMatchObject({ alerted: 1, expired: 1 });
+    expect((await runNotifications(later)).accounts[accountId].certExpiry).toBeUndefined();
+
+    await authed(request(app).put(`/api/reference-options/${soon._id}`)).send({ taxExemptExpiresAt: daysFromToday(20) });
+    expect((await runNotifications(new Date())).accounts[accountId].certExpiry).toMatchObject({ alerted: 1, expired: 0 });
+  });
+
+  it("says once when a record on terms goes past due, and can be switched off", async () => {
+    const accountId = await subscribe();
+    const business = await createBusiness({ taxExempt: false, paymentTermsDays: 15 });
+    const late = (await postEntry(b2bRepair(business, { date: daysFromToday(-40) }))).body;
+    await postEntry(b2bRepair(business, { date: daysFromToday(-2) }));
+
+    const first = await runNotifications(new Date());
+    expect(first.accounts[accountId].overdueInvoices).toMatchObject({ alerted: 1, total: 108.25 });
+    expect((await runNotifications(new Date())).accounts[accountId].overdueInvoices).toBeUndefined();
+
+    // A new due date is a new deadline.
+    await putEntry(late._id, { paymentTermsDays: 30 });
+    expect((await Entry.findById(late._id).setOptions({ allowCrossAccount: true })).overdueNotified).toBe(false);
+    expect((await runNotifications(new Date())).accounts[accountId].overdueInvoices).toMatchObject({ alerted: 1 });
+
+    const prefs = await authed(request(app).put("/api/notifications/prefs")).send({ overdueInvoices: false, certExpiry: false });
+    expect(prefs.body).toMatchObject({ overdueInvoices: false, certExpiry: false, lowStock: true });
+    await putEntry(late._id, { paymentTermsDays: 20 });
+    expect((await runNotifications(new Date())).accounts[accountId].overdueInvoices).toBeUndefined();
+  });
+});
+

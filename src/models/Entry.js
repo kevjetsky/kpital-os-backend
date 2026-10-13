@@ -35,6 +35,14 @@ const entrySchema = new mongoose.Schema(
     // No sales tax is charged on this record (resale or exemption certificate).
     // Only ever true on a B2B record.
     taxExempt: { type: Boolean, default: false },
+    // B2B payment terms in days, copied from the business when the record is
+    // made B2B so later changes to the business do not move old due dates.
+    // dueDate is always date + paymentTermsDays (null when there are no terms);
+    // it is stored so "what is overdue" is a plain indexed-style query.
+    paymentTermsDays: { type: Number, default: 0 },
+    dueDate: { type: Date, default: null },
+    // Set once the overdue push for this record has gone out.
+    overdueNotified: { type: Boolean, default: false },
     productServiceName: { type: String, default: "", trim: true },
     productServiceType: {
       type: String,

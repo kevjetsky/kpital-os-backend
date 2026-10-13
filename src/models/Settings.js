@@ -23,7 +23,11 @@ const settingsSchema = new mongoose.Schema(
       lowStock: { type: Boolean, default: true },
       quarterlyTax: { type: Boolean, default: true },
       recurringPosted: { type: Boolean, default: true },
-      weeklySummary: { type: Boolean, default: true }
+      weeklySummary: { type: Boolean, default: true },
+      // B2B: a tax-exempt certificate is about to lapse or has lapsed.
+      certExpiry: { type: Boolean, default: true },
+      // B2B: a record on payment terms has gone past its due date unpaid.
+      overdueInvoices: { type: Boolean, default: true }
     },
     // Dedupe markers so periodic reminders fire once per period, not every run.
     notificationState: {

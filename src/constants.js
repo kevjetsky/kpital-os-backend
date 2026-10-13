@@ -27,6 +27,11 @@ export const REFERENCE_OPTION_KINDS = ["customer", "product_service", "business"
 // Entry types that can be marked B2B (sold to, or refunded to, a saved business).
 // Money-out types other than a refund have no buyer, so the flag is dropped on them.
 export const B2B_ENTRY_TYPES = ["Sales", "Repair", "Refund"];
+// Longest payment terms a business can be given, in days. 0 means no terms:
+// the record has no due date and is never flagged overdue.
+export const MAX_PAYMENT_TERMS_DAYS = 365;
+// How far ahead a tax-exempt certificate's expiry starts being flagged.
+export const CERT_EXPIRY_WARNING_DAYS = 30;
 // How long after a repair a returning customer counts as a warranty callback.
 export const WARRANTY_DAYS = 40;
 // The message a customer gets when their repair is finished. Kept here rather
