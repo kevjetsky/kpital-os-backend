@@ -16,8 +16,9 @@ export const PROFIT_NEUTRAL_ENTRY_TYPES = ["Owner Draw"];
 // moment they're consumed on a repair/sale (see inventory usage), so a separate
 // Parts expense line would double-count. "Tools & Equipment" covers gear that is
 // simply an expense the day it's bought (screwdrivers, heat gun, etc.).
-// "Payroll" was removed too — it's its own entry type now.
-export const EXPENSE_CATEGORIES = ["Rent", "Gas", "Tools & Equipment", "Marketing", "Utilities", "Other"];
+// "Payroll" was removed too — it's its own entry type now. "Shipping" is what a
+// parts order costs to deliver.
+export const EXPENSE_CATEGORIES = ["Rent", "Gas", "Tools & Equipment", "Marketing", "Utilities", "Shipping", "Other"];
 export const ENTRY_STATUSES = ["Pending", "Completed", "Paid"];
 // Where the work itself stands, apart from whether it has been paid for.
 // `status` above is kept in step for older callers: Paid when paid, otherwise

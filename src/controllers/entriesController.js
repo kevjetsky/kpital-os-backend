@@ -1466,69 +1466,108 @@ export const callbackStats = asyncHandler(async (req, res) => {
   });
 });
 
-export const create = asyncHandler(async (req, res) => {
-  const body = req.body ?? {};
-  const type = String(body.type || "");
+// Everything a create or an update decides about a record, from the request
+// and (on an update) the record as it stands. A field the request leaves out
+// keeps its current value on an update and its default on a create. Returns
+// { error } for a request that cannot be saved, or the fields to store.
+async function resolveEntryInput(accountId, body, { existing = null, entryId = null } = {}) {
+  const has = (key) => bodyHas(body, key);
+  const fail = (error) => ({ error });
 
+  const type = body.type ? String(body.type) : existing?.type || "";
   if (!ENTRY_TYPES.includes(type)) {
-    return res.status(400).json({ message: `Type must be one of: ${ENTRY_TYPES.join(", ")}.` });
+    return fail(`Type must be one of: ${ENTRY_TYPES.join(", ")}.`);
   }
 
-  const date = new Date(body.date);
+  const date = body.date ? new Date(body.date) : existing ? existing.date : new Date(NaN);
   if (Number.isNaN(date.getTime())) {
-    return res.status(400).json({ message: "Invalid date." });
+    return fail("Invalid date.");
   }
 
-  let description = String(body.description || "").trim();
+  const description = has("description") || !existing ? String(body.description || "").trim() : existing.description || "";
 
-  const statuses = resolveStatus(body);
-  if (statuses.error) {
-    return res.status(400).json({ message: statuses.error });
-  }
-  const { status, jobStatus } = statuses;
-  const notes = String(body.notes || "").trim();
-  const invoiceNote = String(body.invoiceNote || "").trim().slice(0, 1000);
-  const device = readDeviceFields(body, { type });
-  const rawCategory = String(body.category || "").trim();
-  const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
-
-  const b2b = await resolveB2BFields(req.accountId, body, { type, date });
-  if (b2b.error) {
-    return res.status(400).json({ message: b2b.error });
-  }
-  // The warranty text asks for a review, which reads oddly sent to a store on
-  // every unit, so a B2B record stays quiet unless the request asks otherwise.
-  const suppressSms = bodyHas(body, "suppressSms") ? Boolean(body.suppressSms) : b2b.isB2B;
-
-  const callback = await resolveCallbackFields(req.accountId, body);
-  if (callback.error) {
-    return res.status(400).json({ message: callback.error });
-  }
-
-  const parsedIncome = parseMoneyInput(body.income ?? 0, "Income");
-  if (parsedIncome.error) {
-    return res.status(400).json({ message: parsedIncome.error });
-  }
-  const parsedExpense = parseMoneyInput(body.expense ?? 0, "Expense");
-  if (parsedExpense.error) {
-    return res.status(400).json({ message: parsedExpense.error });
-  }
+  const parsedIncome = body.income !== undefined || !existing
+    ? parseMoneyInput(body.income ?? 0, "Income")
+    : { value: existing.income, error: null };
+  if (parsedIncome.error) return fail(parsedIncome.error);
+  const parsedExpense = body.expense !== undefined || !existing
+    ? parseMoneyInput(body.expense ?? 0, "Expense")
+    : { value: roundMoney((existing.expense || 0) - (existing.inventoryCost || 0)), error: null };
+  if (parsedExpense.error) return fail(parsedExpense.error);
   let income = parsedIncome.value;
   const manualExpense = parsedExpense.value;
 
-  const inventory = await normalizeInventoryUsage(req.accountId, body.inventoryUsage);
-  if (inventory.error) {
-    return res.status(400).json({ message: inventory.error });
+  // inventoryUsage replaces the parts on the record; addInventoryUsage adds to
+  // them, so a caller that only knows the new part does not have to send the
+  // whole list back (and cannot drop the others by leaving them out).
+  const previousUsage = (existing?.inventoryUsage || []).map((item) => (item.toObject ? item.toObject() : item));
+  let inventoryInput;
+  if (has("inventoryUsage")) {
+    inventoryInput = body.inventoryUsage;
+  } else if (has("addInventoryUsage")) {
+    if (!Array.isArray(body.addInventoryUsage)) {
+      return fail("addInventoryUsage must be a list of { itemId, quantity }.");
+    }
+    inventoryInput = [
+      ...previousUsage.map((item) => ({ itemId: String(item.itemId), quantity: item.quantity })),
+      ...body.addInventoryUsage
+    ];
+  }
+  const inventory = inventoryInput !== undefined || !existing
+    ? await normalizeInventoryUsage(accountId, inventoryInput)
+    : { usage: existing.inventoryUsage || [], inventoryCost: Number(existing.inventoryCost || 0), error: null };
+  if (inventory.error) return fail(inventory.error);
+
+  const statuses = resolveStatus(body, { existing });
+  if (statuses.error) return fail(statuses.error);
+  const { status, jobStatus } = statuses;
+
+  const notes = has("notes") || !existing ? String(body.notes || "").trim() : existing.notes || "";
+  const invoiceNote = has("invoiceNote") || !existing
+    ? String(body.invoiceNote || "").trim().slice(0, 1000)
+    : existing.invoiceNote || "";
+  const device = readDeviceFields(body, { type, existing });
+  const rawCategory = has("category") || !existing ? String(body.category || "").trim() : existing.category || "";
+  const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
+
+  const callback = await resolveCallbackFields(accountId, body, { selfId: entryId, existing });
+  if (callback.error) return fail(callback.error);
+
+  const b2b = await resolveB2BFields(accountId, body, { type, date, existing });
+  if (b2b.error) return fail(b2b.error);
+  // The warranty text asks for a review, which reads oddly sent to a store on
+  // every unit, so a new B2B record stays quiet unless the request says otherwise.
+  const suppressSms = has("suppressSms") ? Boolean(body.suppressSms) : existing ? !!existing.suppressSms : b2b.isB2B;
+  // On a B2B record the customer fields come from the business, so whatever the
+  // request says about the customer is ignored. A record leaving B2B drops the
+  // business's details instead of carrying a store over as a walk-in customer.
+  const customerBody = b2b.isB2B ? {} : body;
+  const hasCustomer = (key) => bodyHas(customerBody, key);
+  const leavingB2B = Boolean(existing?.isB2B) && !b2b.isB2B;
+
+  let paymentMethod = toPaymentMethod(existing?.paymentMethod) || "";
+  if (has("paymentMethod")) {
+    const rawPaymentMethod = String(body.paymentMethod || "").trim();
+    const parsedMethod = toPaymentMethod(rawPaymentMethod);
+    if (rawPaymentMethod && !parsedMethod) {
+      return fail(`Payment method must be one of: ${PAYMENT_METHODS.join(", ")}.`);
+    }
+    paymentMethod = parsedMethod;
+  }
+  if (status === "Paid" && !paymentMethod && (existing?.payments || []).length === 0) {
+    return fail("A payment method is required to mark a record as Paid.");
   }
 
-  let customerName = String(body.customerName || "").trim();
-  let customerPhone = String(body.customerPhone || "").trim();
-  let customerInstagram = normalizeInstagramHandle(body.customerInstagram);
-  let customerEmail = String(body.customerEmail || "").trim();
-  let customerAddress = String(body.customerAddress || "").trim();
-  let customerReferenceLabel = String(body.customerReference || "").trim();
-  let customerOptionId = null;
-  if (b2b.isB2B) {
+  // ── Customer ──
+  const kept = existing && !leavingB2B ? existing : {};
+  let customerName = kept.customerName || "";
+  let customerPhone = kept.customerPhone || "";
+  let customerInstagram = normalizeInstagramHandle(kept.customerInstagram);
+  let customerEmail = kept.customerEmail || "";
+  let customerAddress = kept.customerAddress || "";
+  let customerReferenceLabel = kept.customerReference || "";
+  let customerOptionId = !b2b.isB2B && existing?.customerOptionId ? String(existing.customerOptionId) : null;
+  if (b2b.business) {
     ({
       customerName,
       customerPhone,
@@ -1538,53 +1577,62 @@ export const create = asyncHandler(async (req, res) => {
       customerReference: customerReferenceLabel
     } = businessAsCustomer(b2b.business));
   }
+  const customerFieldsTouched = ["customerOptionId", "customerName", "customerPhone", "customerInstagram", "customerEmail"]
+    .some(hasCustomer);
 
-  const rawPaymentMethod = String(body.paymentMethod || "").trim();
-  const paymentMethod = toPaymentMethod(rawPaymentMethod);
-  if (rawPaymentMethod && !paymentMethod) {
-    return res.status(400).json({ message: `Payment method must be one of: ${PAYMENT_METHODS.join(", ")}.` });
+  if (hasCustomer("customerName")) {
+    customerName = String(customerBody.customerName || "").trim();
+    if (!hasCustomer("customerOptionId")) customerOptionId = null;
   }
-  if (status === "Paid" && !paymentMethod) {
-    return res.status(400).json({ message: "A payment method is required to mark a record as Paid." });
-  }
+  if (hasCustomer("customerPhone")) customerPhone = String(customerBody.customerPhone || "").trim();
+  if (hasCustomer("customerInstagram")) customerInstagram = normalizeInstagramHandle(customerBody.customerInstagram);
+  if (hasCustomer("customerEmail")) customerEmail = String(customerBody.customerEmail || "").trim();
+  if (hasCustomer("customerAddress")) customerAddress = String(customerBody.customerAddress || "").trim();
+  if (hasCustomer("customerReference")) customerReferenceLabel = String(customerBody.customerReference || "").trim();
 
-  let productServiceName = String(body.productServiceName || "").trim();
-  let productServiceType = toProductServiceType(body.productServiceType);
-  const parsedProductPrice = parseMoneyInput(body.productServicePrice ?? 0, "Product/service price");
-  if (parsedProductPrice.error) {
-    return res.status(400).json({ message: parsedProductPrice.error });
-  }
-  let productServicePrice = parsedProductPrice.value;
-  let productServiceOptionId = null;
+  if (hasCustomer("customerOptionId")) {
+    const customerRefOption = await resolveReferenceOption(accountId, "customer", customerBody.customerOptionId);
+    if (customerRefOption.error) return fail(customerRefOption.error);
 
-  const customerRefOption = b2b.isB2B
-    ? { option: null, optionId: null, error: null }
-    : await resolveReferenceOption(req.accountId, "customer", body.customerOptionId);
-  if (customerRefOption.error) {
-    return res.status(400).json({ message: customerRefOption.error });
-  }
-  if (customerRefOption.option) {
-    const option = customerRefOption.option;
-    customerOptionId = customerRefOption.optionId;
-    // Typed values win over the stored snapshot; the option fills the blanks.
-    customerName = customerName || option.name;
-    customerPhone = customerPhone || option.phone || "";
-    customerInstagram = customerInstagram || normalizeInstagramHandle(option.instagram);
-    customerEmail = customerEmail || option.email || "";
-    customerAddress = customerAddress || option.address || "";
-    customerReferenceLabel = customerReferenceLabel || option.reference || "";
+    if (!customerRefOption.option) {
+      // Unlinked: whatever the request did not restate goes with the link.
+      customerOptionId = null;
+      if (!hasCustomer("customerName")) customerName = "";
+      if (!hasCustomer("customerPhone")) customerPhone = "";
+      if (!hasCustomer("customerInstagram")) customerInstagram = "";
+      if (!hasCustomer("customerEmail")) customerEmail = "";
+      if (!hasCustomer("customerAddress")) customerAddress = "";
+      if (!hasCustomer("customerReference")) customerReferenceLabel = "";
+    } else {
+      const option = customerRefOption.option;
+      customerOptionId = customerRefOption.optionId;
+      // Typed values win over the stored snapshot; the option fills the blanks.
+      const typed = (key, value) => hasCustomer(key) && value;
+      customerName = typed("customerName", customerName) ? customerName : option.name;
+      customerPhone = typed("customerPhone", customerPhone) ? customerPhone : option.phone || "";
+      customerInstagram = typed("customerInstagram", customerInstagram)
+        ? customerInstagram
+        : normalizeInstagramHandle(option.instagram);
+      customerEmail = typed("customerEmail", customerEmail) ? customerEmail : option.email || "";
+      customerAddress = typed("customerAddress", customerAddress) ? customerAddress : option.address || "";
+      customerReferenceLabel = typed("customerReference", customerReferenceLabel)
+        ? customerReferenceLabel
+        : option.reference || "";
 
-    // Backfill contact info the selected customer was missing.
-    const fills = {};
-    if (customerPhone && !option.phone) fills.phone = customerPhone;
-    if (customerInstagram && !option.instagram) fills.instagram = customerInstagram;
-    if (customerPhone) fills.phoneKey = normalizePhoneKey(customerPhone);
-    if (customerInstagram) fills.instagramKey = normalizeInstagramHandle(customerInstagram);
-    if (Object.keys(fills).length > 0) {
-      await ReferenceOption.updateOne({ _id: option._id, accountId: req.accountId }, { $set: fills });
+      // Backfill contact info the selected customer was missing.
+      const fills = {};
+      if (customerPhone && !option.phone) fills.phone = customerPhone;
+      if (customerInstagram && !option.instagram) fills.instagram = customerInstagram;
+      if (customerPhone) fills.phoneKey = normalizePhoneKey(customerPhone);
+      if (customerInstagram) fills.instagramKey = normalizeInstagramHandle(customerInstagram);
+      if (Object.keys(fills).length > 0) {
+        await ReferenceOption.updateOne({ _id: option._id, accountId }, { $set: fills });
+      }
     }
-  } else if (!b2b.isB2B && (customerPhone || customerInstagram)) {
-    const customer = await linkOrCreateCustomer(req.accountId, {
+  }
+
+  if (!b2b.isB2B && !customerOptionId && (customerPhone || customerInstagram)) {
+    const customer = await linkOrCreateCustomer(accountId, {
       name: customerName,
       phone: customerPhone,
       instagram: customerInstagram,
@@ -1601,21 +1649,49 @@ export const create = asyncHandler(async (req, res) => {
     customerReferenceLabel = customerReferenceLabel || customer.reference || "";
   }
 
-  if (!b2b.isB2B && CUSTOMER_REQUIRED_ENTRY_TYPES.includes(type) && !customerPhone && !customerInstagram) {
-    return res.status(400).json({
-      message: `A customer phone number or Instagram username is required for ${type} records.`
-    });
+  // A new record always needs a way to reach the customer. An update only
+  // checks when it touches customer data, so status/amount tweaks on legacy
+  // records keep working.
+  if (
+    !b2b.isB2B &&
+    (!existing || customerFieldsTouched) &&
+    CUSTOMER_REQUIRED_ENTRY_TYPES.includes(type) &&
+    !customerPhone &&
+    !customerInstagram
+  ) {
+    return fail(`A customer phone number or Instagram username is required for ${type} records.`);
   }
 
-  const productServiceReference = await resolveReferenceOption(req.accountId, "product_service", body.productServiceOptionId);
-  if (productServiceReference.error) {
-    return res.status(400).json({ message: productServiceReference.error });
+  // ── Product/service ──
+  let productServiceName = existing?.productServiceName || "";
+  let productServiceType = toProductServiceType(existing?.productServiceType);
+  let productServicePrice = Number.isFinite(existing?.productServicePrice) ? existing.productServicePrice : 0;
+  let productServiceOptionId = existing?.productServiceOptionId ? String(existing.productServiceOptionId) : null;
+
+  if (has("productServiceName")) {
+    productServiceName = String(body.productServiceName || "").trim();
+    if (!has("productServiceOptionId")) productServiceOptionId = null;
   }
-  if (productServiceReference.option) {
-    productServiceName = productServiceReference.option.name;
-    productServiceType = toProductServiceType(productServiceReference.option.optionType);
-    productServicePrice = priceForRecord(productServiceReference.option, b2b.isB2B);
-    productServiceOptionId = productServiceReference.optionId;
+  if (has("productServiceType")) productServiceType = toProductServiceType(body.productServiceType);
+  if (has("productServicePrice")) {
+    const parsedPrice = parseMoneyInput(body.productServicePrice ?? 0, "Product/service price");
+    if (parsedPrice.error) return fail(parsedPrice.error);
+    productServicePrice = parsedPrice.value;
+  }
+  if (has("productServiceOptionId")) {
+    const productServiceReference = await resolveReferenceOption(accountId, "product_service", body.productServiceOptionId);
+    if (productServiceReference.error) return fail(productServiceReference.error);
+    if (!productServiceReference.option) {
+      productServiceOptionId = null;
+      if (!has("productServiceName")) productServiceName = "";
+      if (!has("productServiceType")) productServiceType = "";
+      if (!has("productServicePrice")) productServicePrice = 0;
+    } else {
+      productServiceOptionId = productServiceReference.optionId;
+      productServiceName = productServiceReference.option.name;
+      productServiceType = toProductServiceType(productServiceReference.option.optionType);
+      productServicePrice = priceForRecord(productServiceReference.option, b2b.isB2B);
+    }
   }
 
   if (!customerName && !customerPhone && !customerInstagram) {
@@ -1624,16 +1700,22 @@ export const create = asyncHandler(async (req, res) => {
     customerReferenceLabel = "";
     customerOptionId = null;
   }
-
   if (!productServiceName) {
     productServiceType = "";
     productServicePrice = 0;
     productServiceOptionId = null;
   }
 
-  const lines = await resolveLineItems(req.accountId, body, { type, isB2B: b2b.isB2B });
-  if (lines.error) {
-    return res.status(400).json({ message: lines.error });
+  // ── Line items ──
+  const lines = await resolveLineItems(accountId, body, { type, isB2B: b2b.isB2B, existing });
+  if (lines.error) return fail(lines.error);
+  // A new total with no new lines: one line simply takes the new price; several
+  // cannot be split up without being told how.
+  if (!lines.provided && lines.items.length > 0 && has("income")) {
+    if (lines.items.length > 1) {
+      return fail("This record has several line items. Change their prices (items) rather than the total.");
+    }
+    lines.items[0].unitPrice = roundMoney(income / lines.items[0].quantity);
   }
   if (lines.items.length > 0) {
     // The lines are the price; the record's own product fields name the first
@@ -1647,84 +1729,104 @@ export const create = asyncHandler(async (req, res) => {
   }
 
   if (!description && !productServiceName) {
-    return res.status(400).json({ message: "Description is required when no product/service is selected." });
+    return fail("Description is required when no product/service is selected.");
   }
 
-  const location = await resolveAddressFields(body, { customerAddress, business: b2b.business });
+  const location = await resolveAddressFields(body, { customerAddress, existing, business: b2b.business });
 
-  const refund = await resolveRefundOf(req.accountId, body, { type });
-  if (refund.error) {
-    return res.status(400).json({ message: refund.error });
-  }
+  const refund = await resolveRefundOf(accountId, body, { type, selfId: entryId, existing });
+  if (refund.error) return fail(refund.error);
 
   // A new record is taxed at the account's rate unless the request names one.
-  const rawTaxRate = body.taxRate !== undefined ? Number(body.taxRate) : await accountTaxRate(req.accountId);
-  const taxRate = await resolveRefundTaxRate(req.accountId, refund.refundOf, rawTaxRate);
+  // An edit keeps the record's own rate, so changing the account's rate later
+  // does not quietly re-tax old work.
+  const accountRate = await accountTaxRate(accountId);
+  const rawTaxRate = body.taxRate !== undefined
+    ? Number(body.taxRate)
+    : existing ? ownTaxRate(existing, accountRate) ?? accountRate : accountRate;
+  const taxRate = await resolveRefundTaxRate(accountId, refund.refundOf, rawTaxRate);
   const expense = roundMoney(manualExpense + inventory.inventoryCost);
   const amounts = computeAmounts(income, expense, type, taxRate, { taxExempt: b2b.taxExempt });
-  await assertInventoryUsageAvailable(req.accountId, [], inventory.usage);
+  await assertInventoryUsageAvailable(accountId, previousUsage, inventory.usage);
 
-  let entry;
+  return {
+    error: null,
+    previousUsage,
+    values: {
+      date,
+      type,
+      description,
+      ...amounts,
+      customerName,
+      customerPhone,
+      customerInstagram,
+      customerEmail,
+      customerAddress,
+      customerReference: customerReferenceLabel,
+      customerOptionId,
+      ...location,
+      isB2B: b2b.isB2B,
+      businessOptionId: b2b.businessOptionId,
+      businessName: b2b.businessName,
+      taxExempt: b2b.taxExempt,
+      paymentTermsDays: b2b.paymentTermsDays,
+      dueDate: b2b.dueDate,
+      refundOf: refund.refundOf,
+      productServiceName,
+      productServiceType,
+      productServicePrice,
+      productServiceOptionId,
+      inventoryUsage: inventory.usage,
+      inventoryCost: inventory.inventoryCost,
+      status,
+      jobStatus,
+      items: lines.items,
+      ...device,
+      invoiceNote,
+      taxRate: Number.isFinite(taxRate) ? taxRate : SALES_TAX_RATE,
+      paymentMethod,
+      notes,
+      category,
+      isWarrantyCallback: callback.isWarrantyCallback,
+      callbackOf: callback.callbackOf,
+      callbackReason: callback.callbackReason,
+      suppressSms
+    }
+  };
+}
+
+// Taken inside the save's transaction, so a save that fails gives its number
+// back instead of leaving a gap.
+const invoiceNumberFor = (accountId, type, session) =>
+  INVOICED_ENTRY_TYPES.includes(type) ? nextInvoiceNumber(accountId, session) : Promise.resolve("");
+
+export const create = asyncHandler(async (req, res) => {
+  const input = await resolveEntryInput(req.accountId, req.body ?? {});
+  if (input.error) {
+    return res.status(400).json({ message: input.error });
+  }
+  const { values } = input;
+
   // A record can be booked straight to Completed/Paid (walk-in paid on the
   // spot), so the warranty has to be assigned here too, not only on update.
   const account = await Settings.findById(req.accountId).select("sms").lean();
   const warranty = { warrantyNumber: "", warrantyStartsAt: null, warrantyEndsAt: null };
-  if (isCompletionStatus(status)) {
-    const draft = { type, warrantyNumber: "" };
+  if (isCompletionStatus(values.status)) {
+    const draft = { type: values.type, warrantyNumber: "" };
     await assignWarrantyOnCompletion(req.accountId, draft, account?.sms);
     warranty.warrantyNumber = draft.warrantyNumber;
     warranty.warrantyStartsAt = draft.warrantyStartsAt || null;
     warranty.warrantyEndsAt = draft.warrantyEndsAt || null;
   }
 
+  let entry;
   await withTransaction(async (session) => {
-    [entry] = await Entry.create([{
-    accountId: req.accountId,
-    date,
-    type,
-    description,
-    ...warranty,
-    suppressSms,
-    customerName,
-    customerPhone,
-    customerInstagram,
-    customerEmail,
-    customerAddress,
-    customerReference: customerReferenceLabel,
-    customerOptionId,
-    ...location,
-    isB2B: b2b.isB2B,
-    businessOptionId: b2b.businessOptionId,
-    businessName: b2b.businessName,
-    taxExempt: b2b.taxExempt,
-    paymentTermsDays: b2b.paymentTermsDays,
-    dueDate: b2b.dueDate,
-    paymentMethod,
-    productServiceName,
-    productServiceType,
-    productServicePrice,
-    productServiceOptionId,
-    inventoryUsage: inventory.usage,
-    inventoryCost: inventory.inventoryCost,
-    ...amounts,
-    taxRate: Number.isFinite(taxRate) ? taxRate : SALES_TAX_RATE,
-    items: lines.items,
-    ...device,
-    invoiceNumber: INVOICED_ENTRY_TYPES.includes(type) ? await nextInvoiceNumber(req.accountId) : "",
-    invoiceNote,
-    jobStatus,
-    notes,
-    category,
-    isWarrantyCallback: callback.isWarrantyCallback,
-    callbackOf: callback.callbackOf,
-    callbackReason: callback.callbackReason,
-    refundOf: refund.refundOf,
-    status
-    }], { session });
-    await reconcileInventoryUsage(req.accountId, [], inventory.usage, `Used on record ${entry._id}`, session);
+    const invoiceNumber = await invoiceNumberFor(req.accountId, values.type, session);
+    [entry] = await Entry.create([{ accountId: req.accountId, ...values, ...warranty, invoiceNumber }], { session });
+    await reconcileInventoryUsage(req.accountId, [], values.inventoryUsage, `Used on record ${entry._id}`, session);
   });
 
-  if (isCompletionStatus(status)) {
+  if (isCompletionStatus(values.status)) {
     await dispatchWarrantySms(req.accountId, entry);
   }
 
@@ -1747,395 +1849,19 @@ export const update = asyncHandler(async (req, res) => {
   // save is the transition that starts the warranty.
   const wasComplete = isCompletionStatus(existing.status);
 
-  const type = req.body.type ? String(req.body.type) : existing.type;
-  if (!ENTRY_TYPES.includes(type)) {
-    return res.status(400).json({ message: `Type must be one of: ${ENTRY_TYPES.join(", ")}.` });
+  const input = await resolveEntryInput(req.accountId, req.body ?? {}, { existing, entryId });
+  if (input.error) {
+    return res.status(400).json({ message: input.error });
   }
+  const { values, previousUsage } = input;
 
-  const date = req.body.date ? new Date(req.body.date) : existing.date;
-  if (Number.isNaN(date.getTime())) {
-    return res.status(400).json({ message: "Invalid date." });
-  }
-
-  let description = existing.description || "";
-  if (bodyHas(req.body, "description")) {
-    description = String(req.body.description || "").trim();
-  }
-
-  const parsedIncome = req.body.income !== undefined
-    ? parseMoneyInput(req.body.income, "Income")
-    : { value: existing.income, error: null };
-  if (parsedIncome.error) {
-    return res.status(400).json({ message: parsedIncome.error });
-  }
-
-  const parsedExpense = req.body.expense !== undefined
-    ? parseMoneyInput(req.body.expense, "Expense")
-    : { value: roundMoney((existing.expense || 0) - (existing.inventoryCost || 0)), error: null };
-  if (parsedExpense.error) {
-    return res.status(400).json({ message: parsedExpense.error });
-  }
-
-  let income = parsedIncome.value;
-  const manualExpense = parsedExpense.value;
-  // inventoryUsage replaces the parts on the record; addInventoryUsage adds to
-  // them, so a caller that only knows the new part does not have to send the
-  // whole list back (and cannot drop the others by leaving them out).
-  let inventoryInput;
-  if (bodyHas(req.body, "inventoryUsage")) {
-    inventoryInput = req.body.inventoryUsage;
-  } else if (bodyHas(req.body, "addInventoryUsage")) {
-    if (!Array.isArray(req.body.addInventoryUsage)) {
-      return res.status(400).json({ message: "addInventoryUsage must be a list of { itemId, quantity }." });
-    }
-    inventoryInput = [
-      ...(existing.inventoryUsage || []).map((item) => ({ itemId: String(item.itemId), quantity: item.quantity })),
-      ...req.body.addInventoryUsage
-    ];
-  }
-  const inventory = inventoryInput !== undefined
-    ? await normalizeInventoryUsage(req.accountId, inventoryInput)
-    : {
-        usage: existing.inventoryUsage || [],
-        inventoryCost: Number(existing.inventoryCost || 0),
-        error: null
-      };
-  if (inventory.error) {
-    return res.status(400).json({ message: inventory.error });
-  }
-
-  const statuses = resolveStatus(req.body, { existing });
-  if (statuses.error) {
-    return res.status(400).json({ message: statuses.error });
-  }
-  const { status, jobStatus } = statuses;
-  const notes = req.body.notes !== undefined ? String(req.body.notes).trim() : existing.notes;
-  const invoiceNote = bodyHas(req.body, "invoiceNote")
-    ? String(req.body.invoiceNote || "").trim().slice(0, 1000)
-    : existing.invoiceNote || "";
-  const device = readDeviceFields(req.body, { type, existing });
-  const rawCategory = req.body.category !== undefined ? String(req.body.category || "").trim() : (existing.category || "");
-  const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
-  const suppressSms = bodyHas(req.body, "suppressSms")
-    ? Boolean(req.body.suppressSms)
-    : !!existing.suppressSms;
-
-  const callback = await resolveCallbackFields(req.accountId, req.body, { selfId: entryId, existing });
-  if (callback.error) {
-    return res.status(400).json({ message: callback.error });
-  }
-
-  const b2b = await resolveB2BFields(req.accountId, req.body, { type, date, existing });
-  if (b2b.error) {
-    return res.status(400).json({ message: b2b.error });
-  }
-  // On a B2B record the customer fields come from the business, so whatever the
-  // request says about the customer is ignored. A record leaving B2B drops the
-  // business's details instead of carrying a store over as a walk-in customer.
-  const customerBody = b2b.isB2B ? {} : req.body;
-  const leavingB2B = Boolean(existing.isB2B) && !b2b.isB2B;
-
-  let paymentMethod = toPaymentMethod(existing.paymentMethod) || "";
-  if (bodyHas(req.body, "paymentMethod")) {
-    const rawPaymentMethod = String(req.body.paymentMethod || "").trim();
-    const parsedMethod = toPaymentMethod(rawPaymentMethod);
-    if (rawPaymentMethod && !parsedMethod) {
-      return res.status(400).json({ message: `Payment method must be one of: ${PAYMENT_METHODS.join(", ")}.` });
-    }
-    paymentMethod = parsedMethod;
-  }
-  if (status === "Paid" && !paymentMethod && (existing.payments || []).length === 0) {
-    return res.status(400).json({ message: "A payment method is required to mark a record as Paid." });
-  }
-
-  let customerName = leavingB2B ? "" : existing.customerName || "";
-  let customerPhone = leavingB2B ? "" : existing.customerPhone || "";
-  let customerInstagram = leavingB2B ? "" : normalizeInstagramHandle(existing.customerInstagram);
-  let customerEmail = leavingB2B ? "" : existing.customerEmail || "";
-  let customerAddress = leavingB2B ? "" : existing.customerAddress || "";
-  let customerReferenceLabel = leavingB2B ? "" : existing.customerReference || "";
-  let customerOptionId = !b2b.isB2B && existing.customerOptionId ? String(existing.customerOptionId) : null;
-  if (b2b.business) {
-    ({
-      customerName,
-      customerPhone,
-      customerInstagram,
-      customerEmail,
-      customerAddress,
-      customerReference: customerReferenceLabel
-    } = businessAsCustomer(b2b.business));
-  }
-  const customerFieldsTouched = ["customerOptionId", "customerName", "customerPhone", "customerInstagram", "customerEmail"]
-    .some((field) => bodyHas(customerBody, field));
-
-  let productServiceName = existing.productServiceName || "";
-  let productServiceType = toProductServiceType(existing.productServiceType);
-  let productServicePrice = Number.isFinite(existing.productServicePrice) ? existing.productServicePrice : 0;
-  let productServiceOptionId = existing.productServiceOptionId ? String(existing.productServiceOptionId) : null;
-
-  if (bodyHas(customerBody, "customerName")) {
-    customerName = String(customerBody.customerName || "").trim();
-    if (!bodyHas(customerBody, "customerOptionId")) {
-      customerOptionId = null;
-    }
-  }
-
-  if (bodyHas(customerBody, "customerPhone")) {
-    customerPhone = String(customerBody.customerPhone || "").trim();
-  }
-
-  if (bodyHas(customerBody, "customerInstagram")) {
-    customerInstagram = normalizeInstagramHandle(customerBody.customerInstagram);
-  }
-
-  if (bodyHas(customerBody, "customerEmail")) {
-    customerEmail = String(customerBody.customerEmail || "").trim();
-  }
-
-  if (bodyHas(customerBody, "customerAddress")) {
-    customerAddress = String(customerBody.customerAddress || "").trim();
-  }
-
-  if (bodyHas(customerBody, "customerReference")) {
-    customerReferenceLabel = String(customerBody.customerReference || "").trim();
-  }
-
-  if (bodyHas(req.body, "productServiceName")) {
-    productServiceName = String(req.body.productServiceName || "").trim();
-    if (!bodyHas(req.body, "productServiceOptionId")) {
-      productServiceOptionId = null;
-    }
-  }
-
-  if (bodyHas(req.body, "productServiceType")) {
-    productServiceType = toProductServiceType(req.body.productServiceType);
-  }
-
-  if (bodyHas(req.body, "productServicePrice")) {
-    const parsedPrice = parseMoneyInput(req.body.productServicePrice, "Product/service price");
-    if (parsedPrice.error) {
-      return res.status(400).json({ message: parsedPrice.error });
-    }
-    productServicePrice = parsedPrice.value;
-  }
-
-  if (bodyHas(customerBody, "customerOptionId")) {
-    const customerRefOption = await resolveReferenceOption(req.accountId, "customer", customerBody.customerOptionId);
-    if (customerRefOption.error) {
-      return res.status(400).json({ message: customerRefOption.error });
-    }
-
-    if (!customerRefOption.option) {
-      customerOptionId = null;
-      if (!bodyHas(customerBody, "customerName")) {
-        customerName = "";
-      }
-      if (!bodyHas(customerBody, "customerPhone")) {
-        customerPhone = "";
-      }
-      if (!bodyHas(customerBody, "customerInstagram")) {
-        customerInstagram = "";
-      }
-      if (!bodyHas(customerBody, "customerEmail")) {
-        customerEmail = "";
-      }
-      if (!bodyHas(customerBody, "customerAddress")) {
-        customerAddress = "";
-      }
-      if (!bodyHas(customerBody, "customerReference")) {
-        customerReferenceLabel = "";
-      }
-    } else {
-      const option = customerRefOption.option;
-      customerOptionId = customerRefOption.optionId;
-      // Typed values win over the stored snapshot; the option fills the blanks.
-      customerName = (bodyHas(customerBody, "customerName") && customerName) ? customerName : option.name;
-      customerPhone = (bodyHas(customerBody, "customerPhone") && customerPhone) ? customerPhone : (option.phone || "");
-      customerInstagram = (bodyHas(customerBody, "customerInstagram") && customerInstagram)
-        ? customerInstagram
-        : normalizeInstagramHandle(option.instagram);
-      customerEmail = (bodyHas(customerBody, "customerEmail") && customerEmail) ? customerEmail : (option.email || "");
-      customerAddress = (bodyHas(customerBody, "customerAddress") && customerAddress) ? customerAddress : (option.address || "");
-      customerReferenceLabel = (bodyHas(customerBody, "customerReference") && customerReferenceLabel)
-        ? customerReferenceLabel
-        : (option.reference || "");
-
-      // Backfill contact info the selected customer was missing.
-      const fills = {};
-      if (customerPhone && !option.phone) fills.phone = customerPhone;
-      if (customerInstagram && !option.instagram) fills.instagram = customerInstagram;
-      if (customerPhone) fills.phoneKey = normalizePhoneKey(customerPhone);
-      if (customerInstagram) fills.instagramKey = normalizeInstagramHandle(customerInstagram);
-      if (Object.keys(fills).length > 0) {
-        await ReferenceOption.updateOne({ _id: option._id, accountId: req.accountId }, { $set: fills });
-      }
-    }
-  }
-
-  if (!b2b.isB2B && !customerOptionId && (customerPhone || customerInstagram)) {
-    const customer = await linkOrCreateCustomer(req.accountId, {
-      name: customerName,
-      phone: customerPhone,
-      instagram: customerInstagram,
-      email: customerEmail,
-      address: customerAddress,
-      reference: customerReferenceLabel
-    });
-    customerOptionId = String(customer._id);
-    customerName = customerName || customer.name;
-    customerPhone = customerPhone || customer.phone || "";
-    customerInstagram = customerInstagram || normalizeInstagramHandle(customer.instagram);
-    customerEmail = customerEmail || customer.email || "";
-    customerAddress = customerAddress || customer.address || "";
-    customerReferenceLabel = customerReferenceLabel || customer.reference || "";
-  }
-
-  // Only enforce the customer requirement when this update actually touches
-  // customer data, so status/amount tweaks on legacy records keep working.
-  if (
-    customerFieldsTouched &&
-    CUSTOMER_REQUIRED_ENTRY_TYPES.includes(type) &&
-    !customerPhone &&
-    !customerInstagram
-  ) {
-    return res.status(400).json({
-      message: `A customer phone number or Instagram username is required for ${type} records.`
-    });
-  }
-
-  if (bodyHas(req.body, "productServiceOptionId")) {
-    const productServiceReference = await resolveReferenceOption(req.accountId, "product_service", req.body.productServiceOptionId);
-    if (productServiceReference.error) {
-      return res.status(400).json({ message: productServiceReference.error });
-    }
-
-    if (!productServiceReference.option) {
-      productServiceOptionId = null;
-      if (!bodyHas(req.body, "productServiceName")) {
-        productServiceName = "";
-      }
-      if (!bodyHas(req.body, "productServiceType")) {
-        productServiceType = "";
-      }
-      if (!bodyHas(req.body, "productServicePrice")) {
-        productServicePrice = 0;
-      }
-    } else {
-      productServiceOptionId = productServiceReference.optionId;
-      productServiceName = productServiceReference.option.name;
-      productServiceType = toProductServiceType(productServiceReference.option.optionType);
-      productServicePrice = priceForRecord(productServiceReference.option, b2b.isB2B);
-    }
-  }
-
-  if (!customerName && !customerPhone && !customerInstagram) {
-    customerEmail = "";
-    customerAddress = "";
-    customerReferenceLabel = "";
-    customerOptionId = null;
-  }
-
-  if (!productServiceName) {
-    productServiceType = "";
-    productServicePrice = 0;
-    productServiceOptionId = null;
-  }
-
-  const lines = await resolveLineItems(req.accountId, req.body, { type, isB2B: b2b.isB2B, existing });
-  if (lines.error) {
-    return res.status(400).json({ message: lines.error });
-  }
-  // A new total with no new lines: one line simply takes the new price; several
-  // cannot be split up without being told how.
-  if (!lines.provided && lines.items.length > 0 && bodyHas(req.body, "income")) {
-    if (lines.items.length > 1) {
-      return res.status(400).json({
-        message: "This record has several line items. Change their prices (items) rather than the total."
-      });
-    }
-    lines.items[0].unitPrice = roundMoney(income / lines.items[0].quantity);
-  }
-  if (lines.items.length > 0) {
-    income = itemsTotal(lines.items);
-    const primary = lines.items.find((item) => item.productServiceOptionId) || lines.items[0];
-    productServiceName = primary.name;
-    productServiceType = primary.optionType;
-    productServicePrice = primary.unitPrice;
-    productServiceOptionId = primary.productServiceOptionId ? String(primary.productServiceOptionId) : null;
-  }
-
-  if (!description && !productServiceName) {
-    return res.status(400).json({ message: "Description is required when no product/service is selected." });
-  }
-
-  const location = await resolveAddressFields(req.body, { customerAddress, existing, business: b2b.business });
-
-  const refund = await resolveRefundOf(req.accountId, req.body, { type, selfId: entryId, existing });
-  if (refund.error) {
-    return res.status(400).json({ message: refund.error });
-  }
-
-  // An edit keeps the record's own rate, so changing the account's rate later
-  // does not quietly re-tax old work.
-  const accountRate = await accountTaxRate(req.accountId);
-  const rawTaxRate = req.body.taxRate !== undefined ? Number(req.body.taxRate) : ownTaxRate(existing, accountRate) ?? accountRate;
-  const taxRate = await resolveRefundTaxRate(req.accountId, refund.refundOf, rawTaxRate);
-  const expense = roundMoney(manualExpense + inventory.inventoryCost);
-  const amounts = computeAmounts(income, expense, type, taxRate, { taxExempt: b2b.taxExempt });
-  const previousUsage = existing.inventoryUsage ? existing.inventoryUsage.map((item) => item.toObject ? item.toObject() : item) : [];
-  await assertInventoryUsageAvailable(req.accountId, previousUsage, inventory.usage);
-
-  existing.date = date;
-  existing.type = type;
-  existing.description = description;
-  existing.income = amounts.income;
-  existing.expense = amounts.expense;
-  existing.salesTax = amounts.salesTax;
-  existing.netProfit = amounts.netProfit;
-  existing.customerName = customerName;
-  existing.customerPhone = customerPhone;
-  existing.customerInstagram = customerInstagram;
-  existing.customerEmail = customerEmail;
-  existing.customerAddress = customerAddress;
-  existing.customerReference = customerReferenceLabel;
-  existing.customerOptionId = customerOptionId;
-  Object.assign(existing, location);
-  existing.isB2B = b2b.isB2B;
-  existing.businessOptionId = b2b.businessOptionId;
-  existing.businessName = b2b.businessName;
-  existing.taxExempt = b2b.taxExempt;
-  existing.paymentTermsDays = b2b.paymentTermsDays;
   // A new due date is a new deadline, so it earns its own overdue reminder.
-  if (String(existing.dueDate || "") !== String(b2b.dueDate || "")) {
+  if (String(existing.dueDate || "") !== String(values.dueDate || "")) {
     existing.overdueNotified = false;
   }
-  existing.dueDate = b2b.dueDate;
-  existing.refundOf = refund.refundOf;
-  existing.productServiceName = productServiceName;
-  existing.productServiceType = productServiceType;
-  existing.productServicePrice = productServicePrice;
-  existing.productServiceOptionId = productServiceOptionId;
-  existing.inventoryUsage = inventory.usage;
-  existing.inventoryCost = inventory.inventoryCost;
-  existing.status = status;
-  existing.jobStatus = jobStatus;
-  existing.items = lines.items;
-  Object.assign(existing, device);
-  existing.invoiceNote = invoiceNote;
-  existing.taxRate = Number.isFinite(taxRate) ? taxRate : SALES_TAX_RATE;
-  // A record that becomes a sale, repair or refund gets its invoice number then.
-  if (INVOICED_ENTRY_TYPES.includes(type) && !existing.invoiceNumber) {
-    existing.invoiceNumber = await nextInvoiceNumber(req.accountId);
-  }
-  existing.paymentMethod = paymentMethod;
-  existing.notes = notes;
-  existing.category = category;
-  existing.isWarrantyCallback = callback.isWarrantyCallback;
-  existing.callbackOf = callback.callbackOf;
-  existing.callbackReason = callback.callbackReason;
-  // Applied before the dispatch below, so unticking the box on the same save
-  // that completes the job lets the text go out.
-  existing.suppressSms = suppressSms;
+  // suppressSms is applied before the dispatch below, so unticking the box on
+  // the same save that completes the job lets the text go out.
+  Object.assign(existing, values);
 
   const nowComplete = isCompletionStatus(existing.status);
   const account = await Settings.findById(req.accountId).select("sms").lean();
@@ -2148,15 +1874,13 @@ export const update = asyncHandler(async (req, res) => {
   }
 
   await withTransaction(async (session) => {
+    // A record that becomes a sale, repair or refund gets its invoice number then.
+    if (!existing.invoiceNumber) {
+      existing.invoiceNumber = await invoiceNumberFor(req.accountId, existing.type, session);
+    }
     existing.$session(session);
     await existing.save({ session });
-    await reconcileInventoryUsage(
-      req.accountId,
-      previousUsage,
-      inventory.usage,
-      `Updated record ${existing._id}`,
-      session
-    );
+    await reconcileInventoryUsage(req.accountId, previousUsage, values.inventoryUsage, `Updated record ${existing._id}`, session);
   });
 
   // Only the crossing into a finished status texts the customer. Later edits to

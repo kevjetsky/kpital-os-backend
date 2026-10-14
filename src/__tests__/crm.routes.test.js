@@ -349,3 +349,54 @@ describe("device", () => {
     expect(res.body.candidates[0]).toMatchObject({ deviceSerial: "SN-777", invoiceNumber: "INV-1001" });
   });
 });
+
+describe("shared lists", () => {
+  it("publishes the lists the API accepts, without a sign-in", async () => {
+    const res = await request(app).get("/api/meta");
+    expect(res.status).toBe(200);
+    expect(res.body.expenseCategories).toContain("Shipping");
+    expect(res.body.paymentMethods).toContain("Zelle");
+    expect(res.body.entryTypes).toEqual(["Sales", "Repair", "Expenses", "Refund", "Payroll", "Owner Draw"]);
+    expect(res.body.jobStatuses).toEqual(["Booked", "In progress", "Ready", "Done"]);
+  });
+
+  it("keeps Shipping as an expense category", async () => {
+    const res = await postEntry(expense({ category: "Shipping" }));
+    expect(res.status).toBe(201);
+    expect(res.body.category).toBe("Shipping");
+  });
+});
+
+describe("one routine for create and update", () => {
+  it("numbers invoices without gaps when a save is refused", async () => {
+    const first = await postEntry(repair());
+    // Refused before anything is saved: no number is used up.
+    const refused = await postEntry(repair({ customerPhone: "", customerInstagram: "" }));
+    expect(refused.status).toBe(400);
+    const second = await postEntry(repair());
+    expect(first.body.invoiceNumber).toBe("INV-1001");
+    expect(second.body.invoiceNumber).toBe("INV-1002");
+  });
+
+  it("gives a record its number when an update turns it into a job", async () => {
+    const made = await postEntry(expense());
+    expect(made.body.invoiceNumber || "").toBe("");
+    const changed = await putEntry(made.body._id, { type: "Sales", customerPhone: "555-0102", income: 30 });
+    expect(changed.status).toBe(200);
+    expect(changed.body.invoiceNumber).toBe("INV-1001");
+  });
+
+  it("leaves fields the update does not mention as they were", async () => {
+    const made = await postEntry(repair({ notes: "Left at the door", invoiceNote: "90-day warranty", deviceModel: "PS5" }));
+    const changed = await putEntry(made.body._id, { jobStatus: "Ready" });
+    expect(changed.status).toBe(200);
+    expect(changed.body).toMatchObject({
+      notes: "Left at the door",
+      invoiceNote: "90-day warranty",
+      deviceModel: "PS5",
+      income: 100,
+      jobStatus: "Ready",
+      customerPhone: "555-0101"
+    });
+  });
+});
