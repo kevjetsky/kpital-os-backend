@@ -31,8 +31,11 @@ import {
   startOfUtcDay,
   isTaxExemptOn,
   priceForRecord,
-  serializeReferenceOption
+  serializeReferenceOption,
+  splitName,
+  isPlaceholderName
 } from "../utils.js";
+import { nextInvoiceNumber } from "../models/InvoiceCounter.js";
 import { parseAddressText, resolveAddress } from "../services/geoService.js";
 import {
   ENTRY_TYPES,
@@ -41,6 +44,12 @@ import {
   PAYMENT_METHODS,
   CUSTOMER_REQUIRED_ENTRY_TYPES,
   B2B_ENTRY_TYPES,
+  JOB_STATUSES,
+  FINISHED_JOB_STATUSES,
+  INVOICED_ENTRY_TYPES,
+  LINE_ITEM_ENTRY_TYPES,
+  MAX_LINE_ITEMS,
+  SALES_TAX_RATE,
   MAX_PAYMENT_TERMS_DAYS,
   PROFIT_NEUTRAL_ENTRY_TYPES,
   DEFAULT_PAGE_SIZE,
@@ -68,10 +77,24 @@ async function linkOrCreateCustomer(accountId, { name, phone, instagram, email, 
     // Remembered so the customer's next record starts with their address (and
     // area) without it being typed again.
     if (address && !match.address) fills.address = address;
-    if (Object.keys(fills).length > 0) {
-      await ReferenceOption.updateOne({ _id: match._id, accountId }, { $set: fills });
+    // A customer first saved under their phone number gets their real name once
+    // one is typed. A real name already on file is never replaced.
+    const namesThem = name && !isPlaceholderName(name, phone, instagram);
+    const nameFills =
+      namesThem && isPlaceholderName(match.name, match.phone, match.instagram)
+        ? { name, normalizedName: normalizeOptionName(name), ...splitName(name) }
+        : {};
+    if (Object.keys(fills).length > 0 || Object.keys(nameFills).length > 0) {
+      try {
+        await ReferenceOption.updateOne({ _id: match._id, accountId }, { $set: { ...fills, ...nameFills } });
+      } catch (error) {
+        // Another customer already has that name; keep the contact fills only.
+        if (error?.code !== 11000) throw error;
+        await ReferenceOption.updateOne({ _id: match._id, accountId }, { $set: fills });
+        return { ...match, ...fills };
+      }
     }
-    return { ...match, ...fills };
+    return { ...match, ...fills, ...nameFills };
   }
 
   const baseName = deriveCustomerName(name, phone, instagram);
@@ -80,6 +103,7 @@ async function linkOrCreateCustomer(accountId, { name, phone, instagram, email, 
     kind: "customer",
     name: baseName,
     normalizedName: normalizeOptionName(baseName),
+    ...(isPlaceholderName(baseName, phone, instagram) ? {} : splitName(baseName)),
     phone: phone || "",
     phoneKey: normalizePhoneKey(phone),
     instagram: instagram || "",
@@ -406,6 +430,148 @@ async function resolveAddressFields(body, { customerAddress, existing = null, bu
   };
 }
 
+// ── Job and payment status ─────────────────────────────────────────────────
+
+// A record saved before job status existed reads as In progress while Pending,
+// and Done once it was completed or paid.
+function jobStatusOf(entry) {
+  if (entry?.jobStatus && JOB_STATUSES.includes(entry.jobStatus)) return entry.jobStatus;
+  return entry?.status === "Pending" ? "In progress" : "Done";
+}
+
+// Job status (where the work stands) and the stored `status`, which is kept in
+// step for older callers and the warranty clock: Paid when paid, otherwise
+// Completed once the job is Ready or Done, otherwise Pending.
+//
+// jobStatus sets the work's progress. `status` says whether it is paid; sent on
+// its own, as older callers and the MCP do, Completed and Paid also mean the
+// work is finished and Pending that it is not.
+function resolveStatus(body, { existing = null } = {}) {
+  let legacy = null;
+  if (bodyHas(body, "status") && body.status !== undefined && body.status !== null && body.status !== "") {
+    legacy = toStatus(body.status);
+    if (!legacy) return { error: "Status must be Pending, Completed, or Paid." };
+  }
+
+  const current = existing ? jobStatusOf(existing) : null;
+  let jobStatus;
+  if (bodyHas(body, "jobStatus") && body.jobStatus) {
+    jobStatus = String(body.jobStatus).trim();
+    if (!JOB_STATUSES.includes(jobStatus)) {
+      return { error: `Job status must be one of: ${JOB_STATUSES.join(", ")}.` };
+    }
+  } else if (legacy === "Pending") {
+    jobStatus = current && !FINISHED_JOB_STATUSES.includes(current) ? current : "In progress";
+  } else if (legacy) {
+    jobStatus = current && FINISHED_JOB_STATUSES.includes(current) ? current : "Done";
+  } else {
+    jobStatus = current || "In progress";
+  }
+
+  const paid = legacy ? legacy === "Paid" : bodyHas(body, "paid") ? Boolean(body.paid) : existing?.status === "Paid";
+  const status = paid ? "Paid" : FINISHED_JOB_STATUSES.includes(jobStatus) ? "Completed" : "Pending";
+  return { jobStatus, status, error: null };
+}
+
+// ── Line items ─────────────────────────────────────────────────────────────
+
+const lineTotal = (item) => roundMoney(item.quantity * item.unitPrice);
+const itemsTotal = (items) => roundMoney(items.reduce((sum, item) => sum + lineTotal(item), 0));
+const plainItems = (items) => (items || []).map((item) => (item.toObject ? item.toObject() : { ...item }));
+
+// What was charged, line by line, on a sale or repair. A line can name a saved
+// product/service, whose name and price (its B2B price on a B2B record) fill in
+// whatever the line leaves out. `provided` is false when the request did not
+// send lines, so the record keeps the ones it has.
+async function resolveLineItems(accountId, body, { type, isB2B, existing = null } = {}) {
+  if (!LINE_ITEM_ENTRY_TYPES.includes(type)) return { items: [], provided: true, error: null };
+  if (!bodyHas(body, "items")) return { items: plainItems(existing?.items), provided: false, error: null };
+  if (!Array.isArray(body.items)) {
+    return { error: "items must be a list of { productServiceOptionId, name, quantity, unitPrice }." };
+  }
+  if (body.items.length > MAX_LINE_ITEMS) return { error: `A record can have at most ${MAX_LINE_ITEMS} line items.` };
+
+  const ids = body.items
+    .map((item) => String(item?.productServiceOptionId || "").trim())
+    .filter((id) => mongoose.Types.ObjectId.isValid(id));
+  const options = ids.length
+    ? await ReferenceOption.find({ accountId, kind: "product_service", _id: { $in: ids } }).lean()
+    : [];
+  const byId = new Map(options.map((option) => [String(option._id), option]));
+
+  const items = [];
+  for (const raw of body.items) {
+    const optionId = String(raw?.productServiceOptionId || "").trim();
+    if (optionId && !mongoose.Types.ObjectId.isValid(optionId)) return { error: "Invalid product/service id on a line item." };
+    const option = optionId ? byId.get(optionId) : null;
+    if (optionId && !option) return { error: "A line item's product/service was not found." };
+
+    const name = (String(raw?.name ?? "").trim() || option?.name || "").slice(0, 160);
+    if (!name) return { error: "Each line item needs a name or a product/service." };
+
+    const blank = (value) => value === undefined || value === null || value === "";
+    const quantity = blank(raw?.quantity) ? 1 : Number(raw.quantity);
+    if (!Number.isFinite(quantity) || quantity <= 0 || quantity > 999) {
+      return { error: "A line item's quantity must be more than 0 and at most 999." };
+    }
+    let unitPrice;
+    if (blank(raw?.unitPrice)) {
+      unitPrice = option ? priceForRecord(option, isB2B) : 0;
+    } else {
+      const parsed = parseMoneyInput(raw.unitPrice, "Line item price");
+      if (parsed.error) return { error: parsed.error };
+      unitPrice = parsed.value;
+    }
+
+    items.push({
+      productServiceOptionId: option ? option._id : null,
+      name,
+      optionType: option ? toProductServiceType(option.optionType) : toProductServiceType(raw?.optionType),
+      quantity: roundMoney(quantity),
+      unitPrice: roundMoney(unitPrice)
+    });
+  }
+  return { items, provided: true, error: null };
+}
+
+// ── Device ─────────────────────────────────────────────────────────────────
+
+const DEVICE_FIELDS = { deviceModel: 80, deviceSerial: 60, problemReported: 1000, deviceCondition: 1000, deviceAccessories: 300 };
+
+// Serial numbers are compared as typed on the label: no spaces, upper case.
+export function normalizeSerial(value) {
+  return String(value || "").toUpperCase().replace(/\s+/g, "").slice(0, DEVICE_FIELDS.deviceSerial);
+}
+
+// The customer's device on a sale or repair. Anything the request leaves out
+// keeps its stored value.
+function readDeviceFields(body, { type, existing = null } = {}) {
+  return Object.fromEntries(
+    Object.entries(DEVICE_FIELDS).map(([key, limit]) => {
+      if (!LINE_ITEM_ENTRY_TYPES.includes(type)) return [key, ""];
+      const value = bodyHas(body, key) ? String(body[key] ?? "").trim() : existing?.[key] || "";
+      return [key, key === "deviceSerial" ? normalizeSerial(value) : value.slice(0, limit)];
+    })
+  );
+}
+
+// ── Tax rate ───────────────────────────────────────────────────────────────
+
+async function accountTaxRate(accountId) {
+  const account = await Settings.findById(accountId).select("salesTaxRate").lean();
+  return typeof account?.salesTaxRate === "number" ? account.salesTaxRate : SALES_TAX_RATE;
+}
+
+// The rate an existing record was taxed at. Records saved before the rate was
+// stored have it worked back from their amounts; the rounding in those is
+// smoothed by snapping to the account's rate when it is that close.
+function ownTaxRate(entry, accountRate) {
+  if (typeof entry?.taxRate === "number") return entry.taxRate;
+  if (!entry || entry.taxExempt || !(entry.income > 0) || !(entry.salesTax > 0)) return null;
+  const implied = entry.salesTax / entry.income;
+  return Math.abs(implied - accountRate) < 0.0005 ? accountRate : Math.min(1, implied);
+}
+
 // The rate to reverse on a refund. A linked original gives back exactly the tax
 // it charged — prorated when only part of the sale is refunded — which stays
 // correct even if the account's tax rate changed since. Unlinked refunds fall
@@ -526,7 +692,7 @@ async function assertInventoryUsageAvailable(accountId, previousUsage, nextUsage
 async function attachRefundLinks(accountId, entries) {
   if (!Array.isArray(entries) || entries.length === 0) return entries;
 
-  const SUMMARY_FIELDS = "date description productServiceName type income expense customerName";
+  const SUMMARY_FIELDS = "date description productServiceName type income expense customerName invoiceNumber";
   const pageIds = entries.map((entry) => entry._id);
   const originalIds = Array.from(
     new Set(entries.map((entry) => entry.refundOf).filter(Boolean).map(String))
@@ -632,6 +798,7 @@ export const businessStatement = asyncHandler(async (req, res) => {
     if (billing.overdue) totals.overdue = roundMoney(totals.overdue + billing.balance);
     return {
       _id: String(entry._id),
+      invoiceNumber: entry.invoiceNumber || "",
       date: entry.date,
       type: entry.type,
       status: entry.status,
@@ -761,8 +928,24 @@ export const areaStats = asyncHandler(async (req, res) => {
 });
 
 export const list = asyncHandler(async (req, res) => {
-  const { type, status, page, limit, search, callbacks, b2b, businessOptionId, overdue, zip } = req.query;
+  const { type, status, page, limit, search, callbacks, b2b, businessOptionId, overdue, zip, jobStatus } = req.query;
   const query = { accountId: req.accountId };
+
+  // Records saved before job status existed have none; they count by the
+  // status they carry, the same way jobStatusOf reads them.
+  if (jobStatus) {
+    const wanted = String(jobStatus).split(",").map((value) => value.trim()).filter(Boolean);
+    if (wanted.some((value) => !JOB_STATUSES.includes(value))) {
+      return res.status(400).json({ message: `jobStatus filter must be one of: ${JOB_STATUSES.join(", ")}.` });
+    }
+    const legacy = [];
+    if (wanted.includes("In progress")) legacy.push("Pending");
+    if (wanted.includes("Done")) legacy.push("Completed", "Paid");
+    query.$and = [
+      ...(query.$and || []),
+      { $or: [{ jobStatus: { $in: wanted } }, ...(legacy.length ? [{ jobStatus: { $exists: false }, status: { $in: legacy } }] : [])] }
+    ];
+  }
 
   if (zip) {
     const zipFilter = String(zip).trim();
@@ -775,7 +958,7 @@ export const list = asyncHandler(async (req, res) => {
   // Combined with $and so it narrows, rather than replaces, a type or status
   // filter given alongside it.
   if (["true", "1"].includes(String(overdue || "").toLowerCase())) {
-    query.$and = Object.entries(overdueFilter()).map(([field, condition]) => ({ [field]: condition }));
+    query.$and = [...(query.$and || []), ...Object.entries(overdueFilter()).map(([field, condition]) => ({ [field]: condition }))];
   }
 
   if (b2b !== undefined) {
@@ -834,6 +1017,10 @@ export const list = asyncHandler(async (req, res) => {
       { customerReference: searchRegex },
       { customerAddress: searchRegex },
       { addressNeighborhood: searchRegex },
+      { invoiceNumber: searchRegex },
+      { deviceModel: searchRegex },
+      { deviceSerial: searchRegex },
+      { problemReported: searchRegex },
       { businessName: searchRegex },
       { productServiceName: searchRegex },
       { category: searchRegex }
@@ -916,7 +1103,7 @@ export const summary = asyncHandler(async (req, res) => {
 
   const accountId = toAccountObjectId(req.accountId);
 
-  const [rangeRows, statusRows, quarterRows] = await Promise.all([
+  const [rangeRows, statusRows, quarterRows, jobRows] = await Promise.all([
     Entry.aggregate([
       { $match: { accountId, date: { $gte: fromDate, $lte: rangeEnd } } },
       {
@@ -947,6 +1134,24 @@ export const summary = asyncHandler(async (req, res) => {
     Entry.aggregate([
       { $match: { accountId, date: { $gte: quarterStart, $lt: quarterEnd } } },
       { $group: { _id: null, salesTax: { $sum: "$salesTax" } } }
+    ]),
+    // Jobs (sales and repairs) whose work is not done, and that are not paid.
+    // Expenses are left out: nobody owes the business for them.
+    Entry.aggregate([
+      { $match: { accountId, type: { $in: ["Sales", "Repair"] } } },
+      {
+        $project: {
+          status: 1,
+          jobStatus: { $ifNull: ["$jobStatus", { $cond: [{ $eq: ["$status", "Pending"] }, "In progress", "Done"] }] }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          open: { $sum: { $cond: [{ $in: ["$jobStatus", ["Booked", "In progress", "Ready"]] }, 1, 0] } },
+          unpaid: { $sum: { $cond: [{ $ne: ["$status", "Paid"] }, 1, 0] } }
+        }
+      }
     ])
   ]);
 
@@ -975,6 +1180,8 @@ export const summary = asyncHandler(async (req, res) => {
     // anything that is not Paid.
     pendingRecords: statusCounts.Pending,
     unpaidRecords: totalRecords - statusCounts.Paid,
+    openJobs: jobRows[0]?.open || 0,
+    unpaidJobs: jobRows[0]?.unpaid || 0,
     quarter: {
       year: quarterYear,
       quarter: quarterNumber,
@@ -988,7 +1195,7 @@ export const summary = asyncHandler(async (req, res) => {
 // their recent Repair entries inside the warranty window — the jobs a new
 // visit could be a callback on.
 export const warrantyCandidates = asyncHandler(async (req, res) => {
-  const { customerOptionId, businessOptionId, phone, instagram, date, windowDays, excludeId } = req.query;
+  const { customerOptionId, businessOptionId, phone, instagram, date, windowDays, excludeId, serial } = req.query;
 
   const parsedWindow = windowDays !== undefined ? Number(windowDays) : WARRANTY_DAYS;
   if (!Number.isFinite(parsedWindow) || parsedWindow <= 0 || parsedWindow > 365) {
@@ -999,6 +1206,10 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
   if (Number.isNaN(referenceDate.getTime())) {
     return res.status(400).json({ message: "Invalid date." });
   }
+
+  // A serial number is the console itself, whoever brings it in: the surest
+  // sign a repair is coming back.
+  const serialNumber = normalizeSerial(serial);
 
   // A B2B repair belongs to a business, not a customer profile, so its recent
   // jobs are found by the business it was done for.
@@ -1011,11 +1222,11 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
   if (optionId && !mongoose.Types.ObjectId.isValid(optionId)) {
     return res.status(400).json({ message: "Invalid customerOptionId." });
   }
-  if (!businessId && !optionId) {
+  if (!serialNumber && !businessId && !optionId) {
     const cleanPhone = String(phone || "").trim();
     const cleanInstagram = normalizeInstagramHandle(instagram);
     if (!cleanPhone && !cleanInstagram) {
-      return res.status(400).json({ message: "Provide customerOptionId, businessOptionId, phone, or instagram." });
+      return res.status(400).json({ message: "Provide customerOptionId, businessOptionId, serial, phone, or instagram." });
     }
     const match = await findCustomerByContact(req.accountId, cleanPhone, cleanInstagram);
     if (!match) {
@@ -1027,7 +1238,11 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
   const windowStart = new Date(referenceDate.getTime() - parsedWindow * 24 * 60 * 60 * 1000);
   const query = {
     accountId: req.accountId,
-    ...(businessId ? { businessOptionId: businessId } : { customerOptionId: optionId }),
+    ...(serialNumber
+      ? { deviceSerial: serialNumber }
+      : businessId
+        ? { businessOptionId: businessId }
+        : { customerOptionId: optionId }),
     type: "Repair",
     date: { $gte: windowStart, $lte: referenceDate }
   };
@@ -1038,10 +1253,15 @@ export const warrantyCandidates = asyncHandler(async (req, res) => {
 
   const candidates = await Entry.find(query)
     .sort({ date: -1 })
-    .select("date description productServiceName income status isWarrantyCallback callbackOf customerName")
+    .select("date description productServiceName income status isWarrantyCallback callbackOf customerName deviceModel deviceSerial invoiceNumber")
     .lean();
 
-  return res.json({ windowDays: parsedWindow, customerOptionId: businessId ? null : optionId, candidates });
+  return res.json({
+    windowDays: parsedWindow,
+    customerOptionId: serialNumber || businessId ? null : optionId,
+    matchedBy: serialNumber ? "serial" : businessId ? "business" : "customer",
+    candidates
+  });
 });
 
 // GET /api/entries/refund-candidates
@@ -1261,11 +1481,14 @@ export const create = asyncHandler(async (req, res) => {
 
   let description = String(body.description || "").trim();
 
-  const status = toStatus(body.status || "Pending");
-  if (!status) {
-    return res.status(400).json({ message: "Status must be Pending, Completed, or Paid." });
+  const statuses = resolveStatus(body);
+  if (statuses.error) {
+    return res.status(400).json({ message: statuses.error });
   }
+  const { status, jobStatus } = statuses;
   const notes = String(body.notes || "").trim();
+  const invoiceNote = String(body.invoiceNote || "").trim().slice(0, 1000);
+  const device = readDeviceFields(body, { type });
   const rawCategory = String(body.category || "").trim();
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
 
@@ -1290,7 +1513,7 @@ export const create = asyncHandler(async (req, res) => {
   if (parsedExpense.error) {
     return res.status(400).json({ message: parsedExpense.error });
   }
-  const income = parsedIncome.value;
+  let income = parsedIncome.value;
   const manualExpense = parsedExpense.value;
 
   const inventory = await normalizeInventoryUsage(req.accountId, body.inventoryUsage);
@@ -1408,6 +1631,21 @@ export const create = asyncHandler(async (req, res) => {
     productServiceOptionId = null;
   }
 
+  const lines = await resolveLineItems(req.accountId, body, { type, isB2B: b2b.isB2B });
+  if (lines.error) {
+    return res.status(400).json({ message: lines.error });
+  }
+  if (lines.items.length > 0) {
+    // The lines are the price; the record's own product fields name the first
+    // one, for the screens and reports that show a single product.
+    income = itemsTotal(lines.items);
+    const primary = lines.items.find((item) => item.productServiceOptionId) || lines.items[0];
+    productServiceName = primary.name;
+    productServiceType = primary.optionType;
+    productServicePrice = primary.unitPrice;
+    productServiceOptionId = primary.productServiceOptionId ? String(primary.productServiceOptionId) : null;
+  }
+
   if (!description && !productServiceName) {
     return res.status(400).json({ message: "Description is required when no product/service is selected." });
   }
@@ -1419,7 +1657,8 @@ export const create = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: refund.error });
   }
 
-  const rawTaxRate = body.taxRate !== undefined ? Number(body.taxRate) : undefined;
+  // A new record is taxed at the account's rate unless the request names one.
+  const rawTaxRate = body.taxRate !== undefined ? Number(body.taxRate) : await accountTaxRate(req.accountId);
   const taxRate = await resolveRefundTaxRate(req.accountId, refund.refundOf, rawTaxRate);
   const expense = roundMoney(manualExpense + inventory.inventoryCost);
   const amounts = computeAmounts(income, expense, type, taxRate, { taxExempt: b2b.taxExempt });
@@ -1468,6 +1707,12 @@ export const create = asyncHandler(async (req, res) => {
     inventoryUsage: inventory.usage,
     inventoryCost: inventory.inventoryCost,
     ...amounts,
+    taxRate: Number.isFinite(taxRate) ? taxRate : SALES_TAX_RATE,
+    items: lines.items,
+    ...device,
+    invoiceNumber: INVOICED_ENTRY_TYPES.includes(type) ? await nextInvoiceNumber(req.accountId) : "",
+    invoiceNote,
+    jobStatus,
     notes,
     category,
     isWarrantyCallback: callback.isWarrantyCallback,
@@ -1531,7 +1776,7 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: parsedExpense.error });
   }
 
-  const income = parsedIncome.value;
+  let income = parsedIncome.value;
   const manualExpense = parsedExpense.value;
   // inventoryUsage replaces the parts on the record; addInventoryUsage adds to
   // them, so a caller that only knows the new part does not have to send the
@@ -1559,11 +1804,16 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: inventory.error });
   }
 
-  const status = req.body.status !== undefined ? toStatus(req.body.status) : existing.status;
-  if (!status) {
-    return res.status(400).json({ message: "Status must be Pending, Completed, or Paid." });
+  const statuses = resolveStatus(req.body, { existing });
+  if (statuses.error) {
+    return res.status(400).json({ message: statuses.error });
   }
+  const { status, jobStatus } = statuses;
   const notes = req.body.notes !== undefined ? String(req.body.notes).trim() : existing.notes;
+  const invoiceNote = bodyHas(req.body, "invoiceNote")
+    ? String(req.body.invoiceNote || "").trim().slice(0, 1000)
+    : existing.invoiceNote || "";
+  const device = readDeviceFields(req.body, { type, existing });
   const rawCategory = req.body.category !== undefined ? String(req.body.category || "").trim() : (existing.category || "");
   const category = type === "Expenses" && EXPENSE_CATEGORIES.includes(rawCategory) ? rawCategory : "";
   const suppressSms = bodyHas(req.body, "suppressSms")
@@ -1791,6 +2041,29 @@ export const update = asyncHandler(async (req, res) => {
     productServiceOptionId = null;
   }
 
+  const lines = await resolveLineItems(req.accountId, req.body, { type, isB2B: b2b.isB2B, existing });
+  if (lines.error) {
+    return res.status(400).json({ message: lines.error });
+  }
+  // A new total with no new lines: one line simply takes the new price; several
+  // cannot be split up without being told how.
+  if (!lines.provided && lines.items.length > 0 && bodyHas(req.body, "income")) {
+    if (lines.items.length > 1) {
+      return res.status(400).json({
+        message: "This record has several line items. Change their prices (items) rather than the total."
+      });
+    }
+    lines.items[0].unitPrice = roundMoney(income / lines.items[0].quantity);
+  }
+  if (lines.items.length > 0) {
+    income = itemsTotal(lines.items);
+    const primary = lines.items.find((item) => item.productServiceOptionId) || lines.items[0];
+    productServiceName = primary.name;
+    productServiceType = primary.optionType;
+    productServicePrice = primary.unitPrice;
+    productServiceOptionId = primary.productServiceOptionId ? String(primary.productServiceOptionId) : null;
+  }
+
   if (!description && !productServiceName) {
     return res.status(400).json({ message: "Description is required when no product/service is selected." });
   }
@@ -1802,7 +2075,10 @@ export const update = asyncHandler(async (req, res) => {
     return res.status(400).json({ message: refund.error });
   }
 
-  const rawTaxRate = req.body.taxRate !== undefined ? Number(req.body.taxRate) : undefined;
+  // An edit keeps the record's own rate, so changing the account's rate later
+  // does not quietly re-tax old work.
+  const accountRate = await accountTaxRate(req.accountId);
+  const rawTaxRate = req.body.taxRate !== undefined ? Number(req.body.taxRate) : ownTaxRate(existing, accountRate) ?? accountRate;
   const taxRate = await resolveRefundTaxRate(req.accountId, refund.refundOf, rawTaxRate);
   const expense = roundMoney(manualExpense + inventory.inventoryCost);
   const amounts = computeAmounts(income, expense, type, taxRate, { taxExempt: b2b.taxExempt });
@@ -1841,7 +2117,16 @@ export const update = asyncHandler(async (req, res) => {
   existing.productServiceOptionId = productServiceOptionId;
   existing.inventoryUsage = inventory.usage;
   existing.inventoryCost = inventory.inventoryCost;
-  existing.status = status || "Pending";
+  existing.status = status;
+  existing.jobStatus = jobStatus;
+  existing.items = lines.items;
+  Object.assign(existing, device);
+  existing.invoiceNote = invoiceNote;
+  existing.taxRate = Number.isFinite(taxRate) ? taxRate : SALES_TAX_RATE;
+  // A record that becomes a sale, repair or refund gets its invoice number then.
+  if (INVOICED_ENTRY_TYPES.includes(type) && !existing.invoiceNumber) {
+    existing.invoiceNumber = await nextInvoiceNumber(req.accountId);
+  }
   existing.paymentMethod = paymentMethod;
   existing.notes = notes;
   existing.category = category;

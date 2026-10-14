@@ -14,6 +14,7 @@ import {
   toProductServiceType,
   serializeReferenceOption,
   deriveCustomerName,
+  splitName,
   findCustomerByContact
 } from "../utils.js";
 import { MAX_PAYMENT_TERMS_DAYS, REFERENCE_OPTION_KINDS } from "../constants.js";
@@ -174,7 +175,15 @@ export const create = asyncHandler(async (req, res) => {
     const legacyAddress = String(req.body?.address || "").trim();
 
     const notes = String(req.body?.notes || "").trim();
+    // First and last name build the display name; a lone `name` is split into them.
+    const hasParts = ["firstName", "lastName"].some((key) => Object.prototype.hasOwnProperty.call(req.body || {}, key));
+    const parts = hasParts
+      ? { firstName: String(req.body?.firstName || "").trim(), lastName: String(req.body?.lastName || "").trim() }
+      : splitName(name);
+    if (hasParts) name = [parts.firstName, parts.lastName].filter(Boolean).join(" ");
     name = deriveCustomerName(name, phone, instagram);
+    payload.firstName = parts.firstName;
+    payload.lastName = parts.lastName;
     payload.name = name;
     payload.phone = phone;
     payload.phoneKey = normalizePhoneKey(phone);
@@ -275,6 +284,13 @@ export const update = asyncHandler(async (req, res) => {
     existing.phoneKey = normalizePhoneKey(phone);
     existing.instagram = instagram;
     existing.instagramKey = normalizeInstagramHandle(instagram);
+    if (hasOwn("firstName") || hasOwn("lastName")) {
+      existing.firstName = hasOwn("firstName") ? String(req.body?.firstName || "").trim() : existing.firstName || "";
+      existing.lastName = hasOwn("lastName") ? String(req.body?.lastName || "").trim() : existing.lastName || "";
+      name = [existing.firstName, existing.lastName].filter(Boolean).join(" ");
+    } else if (hasOwn("name")) {
+      Object.assign(existing, splitName(name));
+    }
     name = deriveCustomerName(name, phone, instagram);
 
     const addressLine1 = hasOwn("addressLine1")

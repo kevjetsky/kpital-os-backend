@@ -204,6 +204,22 @@ export function toPaymentMethod(value) {
 
 // Customers are identified by phone or Instagram; the name is only a label.
 // When no name is given, fall back to whichever identifier exists.
+// "Jordan Alvarez Jr" -> { firstName: "Jordan", lastName: "Alvarez Jr" }.
+export function splitName(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  return { firstName: parts[0] || "", lastName: parts.slice(1).join(" ") };
+}
+
+// A customer saved before anyone typed a name carries their phone or @handle in
+// its place. That one may be replaced by a real name; a real one never is.
+export function isPlaceholderName(name, phone, instagram) {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) return true;
+  if (trimmed === String(phone || "").trim()) return true;
+  const handle = normalizeInstagramHandle(instagram);
+  return Boolean(handle) && trimmed === `@${handle}`;
+}
+
 export function deriveCustomerName(name, phone, instagram) {
   const trimmedName = String(name || "").trim();
   if (trimmedName) return trimmedName;
@@ -303,6 +319,8 @@ export function serializeReferenceOption(option) {
     return {
       _id: String(option._id),
       name: option.name,
+      firstName: option.firstName || "",
+      lastName: option.lastName || "",
       phone: option.phone || "",
       instagram: option.instagram || "",
       email: option.email || "",

@@ -16,6 +16,7 @@ import pushRouter from "./routes/push.js";
 import notificationsRouter from "./routes/notifications.js";
 import smsRouter from "./routes/sms.js";
 import geoRouter from "./routes/geo.js";
+import businessProfileRouter from "./routes/businessProfile.js";
 import { publicStickDriftRouter, adminStickDriftRouter } from "./routes/stickDrift.js";
 
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
@@ -98,6 +99,7 @@ app.use("/api/push", pushRouter);
 app.use("/api/notifications", notificationsRouter);
 app.use("/api/sms", smsRouter);
 app.use("/api/geo", geoRouter);
+app.use("/api/business-profile", businessProfileRouter);
 app.use("/api/stick-drift", adminStickDriftRouter);
 
 if (process.env.SENTRY_DSN) {

@@ -18,6 +18,19 @@ const settingsSchema = new mongoose.Schema(
     verificationCodeExpiresAt: { type: Date, default: null },
     verificationAttempts: { type: Number, default: 0 },
     verificationPurpose: { type: String, enum: ["", "email", "reset"], default: "" },
+    // How the business appears on invoices, receipts and statements. Kept on the
+    // account so every device prints the same thing. logo is a small data URL.
+    businessProfile: {
+      name: { type: String, default: "", trim: true },
+      phone: { type: String, default: "", trim: true },
+      email: { type: String, default: "", trim: true },
+      address: { type: String, default: "", trim: true },
+      website: { type: String, default: "", trim: true },
+      logo: { type: String, default: "" }
+    },
+    // The sales tax rate new records are charged, as a fraction (0.0825).
+    // Null until it is first set; SALES_TAX_RATE applies until then.
+    salesTaxRate: { type: Number, default: null },
     // Which push notifications the owner wants. All on by default.
     notificationPrefs: {
       lowStock: { type: Boolean, default: true },

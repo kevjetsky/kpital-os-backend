@@ -12,6 +12,9 @@ const referenceOptionSchema = new mongoose.Schema(
       enum: ["customer", "product_service", "business"]
     },
     name: { type: String, required: true, trim: true },
+    // Customer only. `name` stays the display name and is built from these.
+    firstName: { type: String, default: "", trim: true },
+    lastName: { type: String, default: "", trim: true },
     normalizedName: { type: String, required: true, trim: true },
     phone: { type: String, default: "", trim: true },
     phoneKey: { type: String, default: "", trim: true },

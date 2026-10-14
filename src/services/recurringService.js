@@ -1,3 +1,5 @@
+import { nextInvoiceNumber } from "../models/InvoiceCounter.js";
+import { INVOICED_ENTRY_TYPES } from "../constants.js";
 import { RecurringEntry } from "../models/RecurringEntry.js";
 import { Entry } from "../models/Entry.js";
 import { computeAmounts, roundMoney } from "../utils.js";
@@ -74,7 +76,9 @@ function buildEntryPayload(recurring, occurrenceDate) {
     ...amounts,
     notes: recurring.notes || "",
     category: recurring.type === "Expenses" ? recurring.category || "" : "",
-    status: recurring.status || "Paid"
+    status: recurring.status || "Paid",
+    // A posted occurrence is finished work (or a bill already paid).
+    jobStatus: (recurring.status || "Paid") === "Pending" ? "In progress" : "Done"
   };
 }
 
@@ -114,7 +118,12 @@ export async function postDueForRecurring(recurring, asOf = todayUtc()) {
       recurring.lastPostedDate && occurrenceDate <= startOfUtcDay(recurring.lastPostedDate);
 
     if (!alreadyPosted) {
-      const entry = await Entry.create(buildEntryPayload(recurring, occurrenceDate));
+      const payload = buildEntryPayload(recurring, occurrenceDate);
+      // A recurring sale is billed like any other, so it gets the next number.
+      if (INVOICED_ENTRY_TYPES.includes(payload.type)) {
+        payload.invoiceNumber = await nextInvoiceNumber(recurring.accountId);
+      }
+      const entry = await Entry.create(payload);
       created.push(entry);
       recurring.lastPostedDate = occurrenceDate;
       recurring.lastEntryId = entry._id;

@@ -13,9 +13,33 @@ const entrySchema = new mongoose.Schema(
       enum: ["Sales", "Repair", "Expenses", "Refund", "Payroll", "Owner Draw"]
     },
     description: { type: String, default: "", trim: true },
+    // INV-1001 style, on records billed to a customer (sales, repairs, refunds).
+    invoiceNumber: { type: String, default: "", trim: true },
+    // What was charged, line by line. `income` is always their total; a record
+    // saved before line items existed has none and reads as one line.
+    items: [
+      {
+        _id: false,
+        productServiceOptionId: { type: mongoose.Schema.Types.ObjectId, default: null },
+        name: { type: String, required: true, trim: true },
+        optionType: { type: String, enum: ["", "product", "service"], default: "" },
+        quantity: { type: Number, required: true, default: 1 },
+        unitPrice: { type: Number, required: true, default: 0 }
+      }
+    ],
+    // The customer's device, for repairs: identifies it for warranty claims and
+    // keeps its repair history.
+    deviceModel: { type: String, default: "", trim: true },
+    deviceSerial: { type: String, default: "", trim: true, uppercase: true },
+    problemReported: { type: String, default: "", trim: true },
+    deviceCondition: { type: String, default: "", trim: true },
+    deviceAccessories: { type: String, default: "", trim: true },
     income: { type: Number, required: true, default: 0 },
     expense: { type: Number, required: true, default: 0 },
     salesTax: { type: Number, required: true, default: 0 },
+    // The rate the record was taxed at (before any exemption), so editing it
+    // later keeps its own rate even after the account's rate changes.
+    taxRate: { type: Number, default: null },
     netProfit: { type: Number, required: true, default: 0 },
     customerName: { type: String, default: "", trim: true },
     customerPhone: { type: String, default: "", trim: true },
@@ -71,7 +95,9 @@ const entrySchema = new mongoose.Schema(
       }
     ],
     inventoryCost: { type: Number, required: true, default: 0 },
+    // Internal only. invoiceNote is the one printed for the customer.
     notes: { type: String, default: "", trim: true },
+    invoiceNote: { type: String, default: "", trim: true },
     category: { type: String, default: "", trim: true },
     // Warranty callback: this record is rework on a previous job. callbackOf
     // points at the original entry so failure rates and time-to-failure can be
@@ -117,7 +143,10 @@ const entrySchema = new mongoose.Schema(
       required: true,
       enum: ["Pending", "Completed", "Paid"],
       default: "Pending"
-    }
+    },
+    // Where the work stands: Booked, In progress, Ready, Done. Absent on records
+    // saved before it existed; those read as In progress when Pending, else Done.
+    jobStatus: { type: String, enum: ["Booked", "In progress", "Ready", "Done"] }
   },
   { timestamps: true }
 );
@@ -141,6 +170,14 @@ entrySchema.index(
   { accountId: 1, warrantyNumber: 1 },
   { unique: true, partialFilterExpression: { warrantyNumber: { $gt: "" } } }
 );
+
+// Invoice numbers are quoted by customers, so each is unique within an account.
+entrySchema.index(
+  { accountId: 1, invoiceNumber: 1 },
+  { unique: true, partialFilterExpression: { invoiceNumber: { $gt: "" } } }
+);
+// A console's serial number finds its repair history.
+entrySchema.index({ accountId: 1, deviceSerial: 1 }, { partialFilterExpression: { deviceSerial: { $gt: "" } } });
 
 tenantGuard(entrySchema, { modelName: "Entry" });
 

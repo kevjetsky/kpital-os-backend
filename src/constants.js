@@ -19,6 +19,17 @@ export const PROFIT_NEUTRAL_ENTRY_TYPES = ["Owner Draw"];
 // "Payroll" was removed too — it's its own entry type now.
 export const EXPENSE_CATEGORIES = ["Rent", "Gas", "Tools & Equipment", "Marketing", "Utilities", "Other"];
 export const ENTRY_STATUSES = ["Pending", "Completed", "Paid"];
+// Where the work itself stands, apart from whether it has been paid for.
+// `status` above is kept in step for older callers: Paid when paid, otherwise
+// Completed once the job is Ready or Done, otherwise Pending.
+export const JOB_STATUSES = ["Booked", "In progress", "Ready", "Done"];
+// The work is finished: the warranty starts and the legacy status is Completed.
+export const FINISHED_JOB_STATUSES = ["Ready", "Done"];
+// Records billed to a customer. They get a sequential invoice number.
+export const INVOICED_ENTRY_TYPES = ["Sales", "Repair", "Refund"];
+// Records that can be broken into line items (several services or products).
+export const LINE_ITEM_ENTRY_TYPES = ["Sales", "Repair"];
+export const MAX_LINE_ITEMS = 30;
 export const PAYMENT_METHODS = ["Cash", "Card", "Zelle", "Cash App", "Chime", "PayPal", "Venmo", "Apple Pay", "Other"];
 // Entry types that represent customer-facing work and therefore require a
 // reachable customer (phone or Instagram) on every record.
