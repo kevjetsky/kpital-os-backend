@@ -270,11 +270,14 @@ async function resolveRefundOf(accountId, body, { type, selfId = null, existing 
 // means "no change", never "remove"; unticking isB2B is how a record leaves B2B.
 // That also keeps a record editable after its business was deleted: the link is
 // gone but the name snapshot still says who it was for.
+const MAX_WORK_ORDER_LENGTH = 60;
+
 async function resolveB2BFields(accountId, body, { type, date, existing = null } = {}) {
   const none = {
     isB2B: false,
     businessOptionId: null,
     businessName: "",
+    workOrderNumber: "",
     taxExempt: false,
     paymentTermsDays: 0,
     dueDate: null,
@@ -305,6 +308,12 @@ async function resolveB2BFields(accountId, body, { type, date, existing = null }
     return { ...none, error: "Choose the business this B2B record is for." };
   }
 
+  // The business's own work order number for the job. Left out, it keeps what
+  // the record already had.
+  const workOrderNumber = bodyHas(body, "workOrderNumber")
+    ? String(body.workOrderNumber ?? "").trim().slice(0, MAX_WORK_ORDER_LENGTH)
+    : wasB2B ? existing.workOrderNumber || "" : "";
+
   // Unless the request says otherwise, a record keeps its own tax treatment and
   // terms. A record that is only now becoming B2B, or is moving to a different
   // business, takes that business's defaults instead.
@@ -332,6 +341,7 @@ async function resolveB2BFields(accountId, body, { type, date, existing = null }
     isB2B: true,
     businessOptionId,
     businessName,
+    workOrderNumber,
     taxExempt,
     paymentTermsDays,
     // No terms means no due date, so the record is never flagged overdue.
@@ -799,6 +809,7 @@ export const businessStatement = asyncHandler(async (req, res) => {
     return {
       _id: String(entry._id),
       invoiceNumber: entry.invoiceNumber || "",
+      workOrderNumber: entry.workOrderNumber || "",
       date: entry.date,
       type: entry.type,
       status: entry.status,
@@ -1022,6 +1033,7 @@ export const list = asyncHandler(async (req, res) => {
       { deviceSerial: searchRegex },
       { problemReported: searchRegex },
       { businessName: searchRegex },
+      { workOrderNumber: searchRegex },
       { productServiceName: searchRegex },
       { category: searchRegex }
     ];
@@ -1768,6 +1780,7 @@ async function resolveEntryInput(accountId, body, { existing = null, entryId = n
       isB2B: b2b.isB2B,
       businessOptionId: b2b.businessOptionId,
       businessName: b2b.businessName,
+      workOrderNumber: b2b.workOrderNumber,
       taxExempt: b2b.taxExempt,
       paymentTermsDays: b2b.paymentTermsDays,
       dueDate: b2b.dueDate,

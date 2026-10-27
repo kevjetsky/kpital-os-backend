@@ -281,6 +281,50 @@ describe("B2B records", () => {
     expect(await ReferenceOption.countDocuments({ kind: "customer" }).setOptions({ allowCrossAccount: true })).toBe(1);
   });
 
+  it("saves the business's work order number on a B2B record and finds it", async () => {
+    const business = await createBusiness();
+    const created = await postEntry(b2bRepair(business, { workOrderNumber: "  WO-55821 " }));
+    expect(created.status).toBe(201);
+    expect(created.body).toMatchObject({ isB2B: true, workOrderNumber: "WO-55821" });
+    expect(created.body.invoiceNumber).toBeTruthy();
+
+    // An edit that does not mention it keeps it; sending it changes or clears it.
+    const kept = await putEntry(created.body._id, { status: "Completed" });
+    expect(kept.body.workOrderNumber).toBe("WO-55821");
+    const changed = await putEntry(created.body._id, { workOrderNumber: "WO-55822" });
+    expect(changed.body.workOrderNumber).toBe("WO-55822");
+
+    // Two jobs may share one of their work orders: it is their number, not ours.
+    const second = await postEntry(b2bRepair(business, { workOrderNumber: "WO-55822" }));
+    expect(second.status).toBe(201);
+
+    const found = await authed(request(app).get("/api/entries?search=55822"));
+    expect(found.body.map((entry) => entry._id).sort()).toEqual([created.body._id, second.body._id].sort());
+
+    const statement = await authed(request(app).get(`/api/entries/business-statement?businessOptionId=${business._id}`));
+    expect(statement.body.lines.map((line) => line.workOrderNumber)).toEqual(["WO-55822", "WO-55822"]);
+
+    const cleared = await putEntry(created.body._id, { workOrderNumber: "" });
+    expect(cleared.body.workOrderNumber).toBe("");
+  });
+
+  it("keeps no work order number on a record that is not B2B", async () => {
+    const business = await createBusiness();
+    const walkIn = await postEntry({
+      type: "Repair",
+      date: "2026-10-01",
+      description: "HDMI port",
+      income: 100,
+      customerPhone: "555-0101",
+      workOrderNumber: "WO-1"
+    });
+    expect(walkIn.body.workOrderNumber).toBe("");
+
+    const b2b = (await postEntry(b2bRepair(business, { workOrderNumber: "WO-2" }))).body;
+    const leaving = await putEntry(b2b._id, { isB2B: false, customerPhone: "555-0101" });
+    expect(leaving.body).toMatchObject({ isB2B: false, workOrderNumber: "" });
+  });
+
   it("keeps a record's name and tax treatment after its business is deleted", async () => {
     const business = await createBusiness();
     const entry = (await postEntry(b2bRepair(business))).body;

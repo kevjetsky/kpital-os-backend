@@ -65,6 +65,10 @@ const entrySchema = new mongoose.Schema(
     isB2B: { type: Boolean, default: false },
     businessOptionId: { type: mongoose.Schema.Types.ObjectId, default: null },
     businessName: { type: String, default: "", trim: true },
+    // B2B only: the business's own work order number for this job, from their
+    // system, so they can match our invoice to their repair. Printed on the
+    // invoice next to our invoice number. Not unique: it is theirs, not ours.
+    workOrderNumber: { type: String, default: "", trim: true },
     // No sales tax is charged on this record (resale or exemption certificate).
     // Only ever true on a B2B record.
     taxExempt: { type: Boolean, default: false },
