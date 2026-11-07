@@ -19,6 +19,7 @@ import geoRouter from "./routes/geo.js";
 import businessProfileRouter from "./routes/businessProfile.js";
 import metaRouter from "./routes/meta.js";
 import { publicStickDriftRouter, adminStickDriftRouter } from "./routes/stickDrift.js";
+import slotFinderRouter from "./routes/slotFinder.js";
 
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
 
@@ -60,6 +61,12 @@ app.disable("x-powered-by");
 // App Engine's Node runtime does not compress for us.
 app.use(compression());
 app.use(helmet());
+// The Slot Finder can take a customer's address in its query string, which must
+// not be written to the access log.
+morgan.token("url", (req) => {
+  const url = req.originalUrl || req.url || "";
+  return url.startsWith("/api/slot-finder") ? url.split("?")[0] : url;
+});
 app.use(morgan("combined"));
 // Mounted before the dashboard CORS/origin guard: the wefixstickdrift site (SITE_URL) calls this,
 // and the router applies its own CORS, body limit and rate limit.
@@ -103,6 +110,7 @@ app.use("/api/sms", smsRouter);
 app.use("/api/geo", geoRouter);
 app.use("/api/business-profile", businessProfileRouter);
 app.use("/api/stick-drift", adminStickDriftRouter);
+app.use("/api/slot-finder", slotFinderRouter);
 
 if (process.env.SENTRY_DSN) {
   const Sentry = await import("@sentry/node");

@@ -64,7 +64,11 @@ const settingsSchema = new mongoose.Schema(
       callbackPhone: { type: String, default: "", trim: true },
       reviewUrl: { type: String, default: "", trim: true },
       template: { type: String, default: DEFAULT_WARRANTY_SMS_TEMPLATE }
-    }
+    },
+    // Slot Finder: slot grid, service durations, drive buffer, home base and
+    // customer message templates. Unset until the feature is first used, when
+    // the defaults are written (src/slotFinder/settings.js).
+    slotFinder: { type: mongoose.Schema.Types.Mixed, default: undefined }
   },
   { timestamps: true }
 );

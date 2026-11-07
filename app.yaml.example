@@ -32,3 +32,15 @@ env_variables:
   RECEIVING_ADDRESS: '{"name":"We Fix Stick Drift","street":"123 Main St","city":"Houston","state":"TX","zip":"77002"}'
   # The account (Settings _id) that owns work orders created from the website.
   STICK_DRIFT_ACCOUNT_ID: "your-account-object-id"
+  # Slot Finder (/api/slot-finder). Reads the owner's Google Calendar (read-only)
+  # and prices drives with the Google Routes API. Nothing here is ever returned
+  # by the API. GOOGLE_CALENDAR_ACCOUNT_ID is the account (Settings _id) whose
+  # calendar this is; other accounts get a 403, and the feature stays off (503)
+  # until it is set.
+  GOOGLE_CALENDAR_CLIENT_ID: "your-oauth-client-id.apps.googleusercontent.com"
+  GOOGLE_CALENDAR_CLIENT_SECRET: "your-oauth-client-secret"
+  GOOGLE_CALENDAR_REFRESH_TOKEN: "refresh-token-with-calendar.readonly-scope"
+  GOOGLE_CALENDAR_ID: "primary"
+  GOOGLE_CALENDAR_ACCOUNT_ID: "your-account-object-id"
+  # A key restricted to the Routes API.
+  GOOGLE_MAPS_API_KEY: "your-routes-api-key"
