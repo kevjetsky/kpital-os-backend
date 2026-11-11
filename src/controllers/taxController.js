@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import { TaxRemittance } from "../models/TaxRemittance.js";
 import { asyncHandler, parseMoneyInput } from "../utils.js";
-import { getLiability, periodLabel } from "../services/taxService.js";
+import { getLiability, getYearEndPackage, periodLabel } from "../services/taxService.js";
 
 // GET /api/tax/liability?year=YYYY
 // Per-quarter sales tax collected vs. remitted vs. still owed for a year.
@@ -10,6 +10,18 @@ export const liability = asyncHandler(async (req, res) => {
   const year = Number.parseInt(String(req.query.year ?? ""), 10) || now.getUTCFullYear();
   const data = await getLiability(req.accountId, year);
   return res.json(data);
+});
+
+// GET /api/tax/year-end?year=YYYY
+// The year's profit and loss, sales tax position and monthly figures, for the
+// accountant. Defaults to last year, which is the one being filed.
+export const yearEnd = asyncHandler(async (req, res) => {
+  const raw = req.query.year;
+  const year = raw === undefined ? new Date().getUTCFullYear() - 1 : Number(raw);
+  if (!Number.isInteger(year) || year < 2000 || year > 2100) {
+    return res.status(400).json({ message: "A valid year is required." });
+  }
+  return res.json(await getYearEndPackage(req.accountId, year));
 });
 
 // POST /api/tax/remittances  { year, quarter, amount, dateFiled?, note? }

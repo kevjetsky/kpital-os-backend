@@ -1,5 +1,6 @@
 import { Entry } from "../models/Entry.js";
 import { TaxRemittance } from "../models/TaxRemittance.js";
+import { PROFIT_NEUTRAL_ENTRY_TYPES } from "../constants.js";
 import { roundMoney, toAccountObjectId } from "../utils.js";
 
 // Quarters use the entry's calendar date in UTC. Entries store date-only values
@@ -113,5 +114,134 @@ export async function getQuarterOwed(accountId, year, quarter) {
     collected: collected[quarter],
     remitted: remitted[quarter],
     owed: roundMoney(collected[quarter] - remitted[quarter])
+  };
+}
+
+const JOB_TYPES = ["Repair", "Sales"];
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Everything an accountant asks for at year end, in one answer: a profit and
+// loss for the calendar year, the sales tax position by quarter, and the same
+// figures month by month.
+//
+// Profit is worked out here from income and costs rather than summed from the
+// stored netProfit: records saved under the old rule had sales tax taken out of
+// that figure, and a tax return wants one rule applied to the whole year.
+export async function getYearEndPackage(accountId, year) {
+  const match = {
+    accountId: toAccountObjectId(accountId),
+    date: { $gte: new Date(Date.UTC(year, 0, 1)), $lt: new Date(Date.UTC(year + 1, 0, 1)) }
+  };
+
+  const [byMonthAndType, byCategory, liability] = await Promise.all([
+    Entry.aggregate([
+      { $match: match },
+      {
+        $group: {
+          _id: { month: { $month: { date: "$date", timezone: "UTC" } }, type: "$type" },
+          income: { $sum: "$income" },
+          expense: { $sum: "$expense" },
+          parts: { $sum: "$inventoryCost" },
+          exemptIncome: { $sum: { $cond: ["$taxExempt", "$income", 0] } },
+          exemptExpense: { $sum: { $cond: ["$taxExempt", "$expense", 0] } },
+          count: { $sum: 1 }
+        }
+      }
+    ]),
+    Entry.aggregate([
+      { $match: { ...match, type: "Expenses" } },
+      { $group: { _id: "$category", amount: { $sum: "$expense" }, count: { $sum: 1 } } }
+    ]),
+    getLiability(accountId, year)
+  ]);
+
+  const blank = () => ({
+    repairs: 0, sales: 0, refunds: 0, parts: 0, otherJobCosts: 0, operatingExpenses: 0, payroll: 0, ownerDraws: 0, exempt: 0
+  });
+  const months = MONTH_NAMES.map(() => blank());
+  const counts = { jobs: 0, refunds: 0, expenses: 0, payroll: 0, ownerDraws: 0 };
+
+  for (const row of byMonthAndType) {
+    const month = months[row._id.month - 1];
+    const type = row._id.type;
+    if (JOB_TYPES.includes(type)) {
+      month[type === "Repair" ? "repairs" : "sales"] += row.income;
+      month.parts += row.parts;
+      // A job's expense is the parts it used plus anything else spent on it.
+      month.otherJobCosts += row.expense - row.parts;
+      month.exempt += row.exemptIncome;
+      counts.jobs += row.count;
+    } else if (type === "Refund") {
+      month.refunds += row.expense;
+      month.exempt -= row.exemptExpense;
+      counts.refunds += row.count;
+    } else if (type === "Expenses") {
+      month.operatingExpenses += row.expense;
+      counts.expenses += row.count;
+    } else if (type === "Payroll") {
+      month.payroll += row.expense;
+      counts.payroll += row.count;
+    } else if (PROFIT_NEUTRAL_ENTRY_TYPES.includes(type)) {
+      month.ownerDraws += row.expense;
+      counts.ownerDraws += row.count;
+    }
+  }
+
+  const figures = (m) => {
+    const grossIncome = roundMoney(m.repairs + m.sales);
+    const netIncome = roundMoney(grossIncome - m.refunds);
+    const costOfGoods = roundMoney(m.parts + m.otherJobCosts);
+    const expenses = roundMoney(m.operatingExpenses + m.payroll);
+    return { grossIncome, netIncome, costOfGoods, expenses, netProfit: roundMoney(netIncome - costOfGoods - expenses) };
+  };
+
+  const total = months.reduce((sum, month) => {
+    for (const key of Object.keys(sum)) sum[key] += month[key];
+    return sum;
+  }, blank());
+  const yearFigures = figures(total);
+  const exemptSales = roundMoney(total.exempt);
+
+  return {
+    year,
+    generatedAt: new Date().toISOString(),
+    counts,
+    income: {
+      repairs: roundMoney(total.repairs),
+      sales: roundMoney(total.sales),
+      gross: yearFigures.grossIncome,
+      refunds: roundMoney(total.refunds),
+      net: yearFigures.netIncome
+    },
+    costOfGoods: {
+      parts: roundMoney(total.parts),
+      otherJobCosts: roundMoney(total.otherJobCosts),
+      total: yearFigures.costOfGoods
+    },
+    grossProfit: roundMoney(yearFigures.netIncome - yearFigures.costOfGoods),
+    expenses: {
+      byCategory: byCategory
+        .map((row) => ({ category: row._id || "Uncategorized", amount: roundMoney(row.amount), count: row.count }))
+        .sort((a, b) => b.amount - a.amount),
+      operating: roundMoney(total.operatingExpenses),
+      payroll: roundMoney(total.payroll),
+      total: yearFigures.expenses
+    },
+    netProfit: yearFigures.netProfit,
+    // Money the owner took out. Not deductible, so it is not in the profit above.
+    ownerDraws: roundMoney(total.ownerDraws),
+    salesTax: {
+      taxableSales: roundMoney(yearFigures.netIncome - exemptSales),
+      exemptSales,
+      quarters: liability.quarters,
+      totals: liability.totals
+    },
+    months: months.map((month, index) => ({
+      month: index + 1,
+      label: MONTH_NAMES[index],
+      ...figures(month),
+      refunds: roundMoney(month.refunds),
+      ownerDraws: roundMoney(month.ownerDraws)
+    }))
   };
 }

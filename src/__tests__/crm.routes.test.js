@@ -400,3 +400,80 @@ describe("one routine for create and update", () => {
     });
   });
 });
+
+describe("record lists", () => {
+  const listed = async (query) => {
+    const res = await authed(request(app).get(`/api/entries?${query}`));
+    expect(res.status).toBe(200);
+    return res.body;
+  };
+
+  it("pages the jobs and expenses lists apart, by date range, payment and line item", async () => {
+    await postEntry(repair({ date: "2026-09-30", status: "Paid", paymentMethod: "Cash" }));
+    const partly = await postEntry(repair({ date: "2026-10-01", customerPhone: "555-0102" }));
+    await authed(request(app).post(`/api/entries/${partly.body._id}/payments`)).send({ amount: 10, date: "2026-10-01", method: "Cash" });
+    await postEntry(repair({ date: "2026-10-02", customerPhone: "555-0103", items: [{ name: "Thermal paste", quantity: 1, unitPrice: 30 }] }));
+    await postEntry(expense({ date: "2026-10-02" }));
+
+    const jobs = await listed("kind=jobs&page=1&limit=2");
+    expect(jobs.pagination).toMatchObject({ total: 3, totalPages: 2 });
+    expect(jobs.items.map((entry) => entry.date.slice(0, 10))).toEqual(["2026-10-02", "2026-10-01"]);
+
+    const expenses = await listed("kind=expenses&page=1");
+    expect(expenses.items.map((entry) => entry.type)).toEqual(["Expenses"]);
+
+    const october = await listed("kind=jobs&page=1&from=2026-10-01&to=2026-10-02");
+    expect(october.pagination.total).toBe(2);
+
+    expect((await listed("kind=jobs&page=1&payment=Paid")).items.map((entry) => entry.date.slice(0, 10))).toEqual(["2026-09-30"]);
+    expect((await listed("kind=jobs&page=1&payment=Partly%20paid")).items.map((entry) => entry._id)).toEqual([partly.body._id]);
+    expect((await listed("kind=jobs&page=1&payment=Unpaid")).pagination.total).toBe(1);
+
+    expect((await listed("kind=jobs&page=1&search=thermal")).pagination.total).toBe(1);
+  });
+
+  it("refuses a filter it does not know, or a type from the other list", async () => {
+    for (const query of ["kind=other", "payment=Later", "from=nope", "kind=jobs&type=Payroll"]) {
+      const res = await authed(request(app).get(`/api/entries?${query}`));
+      expect(res.status, query).toBe(400);
+    }
+  });
+});
+
+describe("year-end tax package", () => {
+  it("adds the year up into a profit and loss, sales tax by quarter and months", async () => {
+    await postEntry(repair({ date: "2026-02-10", income: 200, expense: 15 }));
+    await postEntry({ type: "Sales", date: "2026-05-03", description: "Controller", income: 60, customerPhone: "555-0104" });
+    await postEntry({ type: "Refund", date: "2026-05-20", description: "Returned controller", expense: 60 });
+    await postEntry(expense({ date: "2026-02-11", expense: 40, category: "Gas" }));
+    await postEntry(expense({ date: "2026-08-01", expense: 25, category: "Gas" }));
+    await postEntry({ type: "Payroll", date: "2026-08-02", description: "Helper", expense: 100 });
+    await postEntry({ type: "Owner Draw", date: "2026-08-03", description: "Draw", expense: 500 });
+    await postEntry(repair({ date: "2025-12-31", income: 999, customerPhone: "555-0105" }));
+    await authed(request(app).post("/api/tax/remittances")).send({ year: 2026, quarter: 1, amount: 16.5 });
+
+    const res = await authed(request(app).get("/api/tax/year-end?year=2026"));
+    expect(res.status).toBe(200);
+    expect(res.body.income).toEqual({ repairs: 200, sales: 60, gross: 260, refunds: 60, net: 200 });
+    expect(res.body.costOfGoods).toEqual({ parts: 0, otherJobCosts: 15, total: 15 });
+    expect(res.body.grossProfit).toBe(185);
+    expect(res.body.expenses).toMatchObject({ operating: 65, payroll: 100, total: 165 });
+    expect(res.body.expenses.byCategory).toEqual([{ category: "Gas", amount: 65, count: 2 }]);
+    expect(res.body.netProfit).toBe(20);
+    expect(res.body.ownerDraws).toBe(500);
+    expect(res.body.counts).toEqual({ jobs: 2, refunds: 1, expenses: 2, payroll: 1, ownerDraws: 1 });
+
+    expect(res.body.salesTax.taxableSales).toBe(200);
+    expect(res.body.salesTax.quarters[0]).toMatchObject({ collected: 16.5, remitted: 16.5, owed: 0 });
+    expect(res.body.salesTax.quarters[1]).toMatchObject({ collected: 0 });
+
+    expect(res.body.months).toHaveLength(12);
+    expect(res.body.months[1]).toMatchObject({ label: "Feb", grossIncome: 200, costOfGoods: 15, expenses: 40, netProfit: 145 });
+    expect(res.body.months.reduce((sum, month) => sum + month.netProfit, 0)).toBe(20);
+  });
+
+  it("refuses a year that is not one", async () => {
+    const res = await authed(request(app).get("/api/tax/year-end?year=soon"));
+    expect(res.status).toBe(400);
+  });
+});

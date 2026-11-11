@@ -18,7 +18,6 @@ import smsRouter from "./routes/sms.js";
 import geoRouter from "./routes/geo.js";
 import businessProfileRouter from "./routes/businessProfile.js";
 import metaRouter from "./routes/meta.js";
-import { publicStickDriftRouter, adminStickDriftRouter } from "./routes/stickDrift.js";
 import slotFinderRouter from "./routes/slotFinder.js";
 
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
@@ -68,9 +67,6 @@ morgan.token("url", (req) => {
   return url.startsWith("/api/slot-finder") ? url.split("?")[0] : url;
 });
 app.use(morgan("combined"));
-// Mounted before the dashboard CORS/origin guard: the wefixstickdrift site (SITE_URL) calls this,
-// and the router applies its own CORS, body limit and rate limit.
-app.use("/api/public/stick-drift", publicStickDriftRouter);
 app.use(
   cors({
     origin(origin, callback) {
@@ -109,7 +105,6 @@ app.use("/api/notifications", notificationsRouter);
 app.use("/api/sms", smsRouter);
 app.use("/api/geo", geoRouter);
 app.use("/api/business-profile", businessProfileRouter);
-app.use("/api/stick-drift", adminStickDriftRouter);
 app.use("/api/slot-finder", slotFinderRouter);
 
 if (process.env.SENTRY_DSN) {

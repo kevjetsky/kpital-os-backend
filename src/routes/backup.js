@@ -8,7 +8,6 @@ import { InventoryItem } from "../models/InventoryItem.js";
 import { InventoryTransaction } from "../models/InventoryTransaction.js";
 import { RecurringEntry } from "../models/RecurringEntry.js";
 import { TaxRemittance } from "../models/TaxRemittance.js";
-import { StickDriftWorkOrder } from "../models/StickDriftWorkOrder.js";
 import { SmsMessage } from "../models/SmsMessage.js";
 import { SmsOptOut } from "../models/SmsOptOut.js";
 import { runBackup } from "../services/backupService.js";
@@ -36,7 +35,6 @@ router.get("/", requireAuth, asyncHandler(async (req, res) => {
         inventoryTransactions: InventoryTransaction.find(scope).sort({ createdAt: 1 }),
         recurringEntries: RecurringEntry.find(scope),
         taxRemittances: TaxRemittance.find(scope).sort({ createdAt: 1 }),
-        stickDriftWorkOrders: StickDriftWorkOrder.find(scope).sort({ createdAt: 1 }),
         smsMessages: SmsMessage.find(scope).sort({ createdAt: 1 }),
         smsOptOuts: SmsOptOut.find(scope)
       }).map(async ([name, query]) => [name, await query.lean()])

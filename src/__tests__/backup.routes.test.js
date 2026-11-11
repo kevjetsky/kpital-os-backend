@@ -160,7 +160,6 @@ describe("GET /api/backup", () => {
       entries: 1,
       recurringEntries: 1,
       taxRemittances: 1,
-      stickDriftWorkOrders: 0,
       smsMessages: 0,
       smsOptOuts: 0
     });

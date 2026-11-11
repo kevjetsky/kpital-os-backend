@@ -938,9 +938,54 @@ export const areaStats = asyncHandler(async (req, res) => {
   });
 });
 
+// Which record types each list screen shows. Mirrors JOB_TYPES and
+// EXPENSE_LIST_TYPES in the frontend's lib/entry-types.ts.
+const LIST_KIND_TYPES = {
+  jobs: ["Repair", "Sales", "Refund"],
+  expenses: ["Expenses", "Payroll", "Owner Draw"]
+};
+
 export const list = asyncHandler(async (req, res) => {
-  const { type, status, page, limit, search, callbacks, b2b, businessOptionId, overdue, zip, jobStatus } = req.query;
+  const { type, status, page, limit, search, callbacks, b2b, businessOptionId, overdue, zip, jobStatus, kind, from, to, payment } = req.query;
   const query = { accountId: req.accountId };
+
+  // The two record lists: jobs (work billed to a customer) and expenses (money
+  // paid out). An explicit type filter, applied further down, narrows this.
+  if (kind) {
+    const types = LIST_KIND_TYPES[String(kind)];
+    if (!types) {
+      return res.status(400).json({ message: "kind must be jobs or expenses." });
+    }
+    query.type = { $in: types };
+  }
+
+  // from/to are calendar days (2026-06-30); `to` includes that whole day.
+  const range = {};
+  for (const [key, raw] of [["from", from], ["to", to]]) {
+    if (!raw) continue;
+    const parsed = new Date(String(raw));
+    if (Number.isNaN(parsed.getTime())) {
+      return res.status(400).json({ message: `Invalid ${key} date.` });
+    }
+    if (key === "from") range.$gte = startOfUtcDay(parsed);
+    else range.$lt = addUtcDays(parsed, 1);
+  }
+  if (Object.keys(range).length > 0) query.date = range;
+
+  // Mirrors paymentStatusOf on the client: a refund is neither paid nor owed,
+  // and a record with money against it that is not yet Paid is partly paid.
+  if (payment) {
+    const somePayment = { payments: { $elemMatch: { amount: { $gt: 0 } } } };
+    const conditions = {
+      Paid: [{ status: "Paid" }],
+      "Partly paid": [{ status: { $ne: "Paid" } }, somePayment],
+      Unpaid: [{ status: { $ne: "Paid" } }, { $nor: [somePayment] }]
+    }[String(payment)];
+    if (!conditions) {
+      return res.status(400).json({ message: "payment must be Paid, Partly paid or Unpaid." });
+    }
+    query.$and = [...(query.$and || []), { type: { $ne: "Refund" } }, ...conditions];
+  }
 
   // Records saved before job status existed have none; they count by the
   // status they carry, the same way jobStatusOf reads them.
@@ -1003,6 +1048,9 @@ export const list = asyncHandler(async (req, res) => {
     if (!ENTRY_TYPES.includes(typeFilter)) {
       return res.status(400).json({ message: `Type filter must be one of: ${ENTRY_TYPES.join(", ")}.` });
     }
+    if (query.type && !query.type.$in.includes(typeFilter)) {
+      return res.status(400).json({ message: `Type ${typeFilter} is not in the ${kind} list.` });
+    }
     query.type = typeFilter;
   }
 
@@ -1035,6 +1083,7 @@ export const list = asyncHandler(async (req, res) => {
       { businessName: searchRegex },
       { workOrderNumber: searchRegex },
       { productServiceName: searchRegex },
+      { "items.name": searchRegex },
       { category: searchRegex }
     ];
   }
