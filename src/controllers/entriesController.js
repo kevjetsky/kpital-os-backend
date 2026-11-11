@@ -978,11 +978,13 @@ export const list = asyncHandler(async (req, res) => {
     const somePayment = { payments: { $elemMatch: { amount: { $gt: 0 } } } };
     const conditions = {
       Paid: [{ status: "Paid" }],
+      // Unpaid and partly paid together: everything money is still owed on.
+      Owed: [{ status: { $ne: "Paid" } }],
       "Partly paid": [{ status: { $ne: "Paid" } }, somePayment],
       Unpaid: [{ status: { $ne: "Paid" } }, { $nor: [somePayment] }]
     }[String(payment)];
     if (!conditions) {
-      return res.status(400).json({ message: "payment must be Paid, Partly paid or Unpaid." });
+      return res.status(400).json({ message: "payment must be Paid, Owed, Partly paid or Unpaid." });
     }
     query.$and = [...(query.$and || []), { type: { $ne: "Refund" } }, ...conditions];
   }

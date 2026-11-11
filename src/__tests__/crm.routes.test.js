@@ -428,6 +428,7 @@ describe("record lists", () => {
     expect((await listed("kind=jobs&page=1&payment=Paid")).items.map((entry) => entry.date.slice(0, 10))).toEqual(["2026-09-30"]);
     expect((await listed("kind=jobs&page=1&payment=Partly%20paid")).items.map((entry) => entry._id)).toEqual([partly.body._id]);
     expect((await listed("kind=jobs&page=1&payment=Unpaid")).pagination.total).toBe(1);
+    expect((await listed("kind=jobs&page=1&payment=Owed")).pagination.total).toBe(2);
 
     expect((await listed("kind=jobs&page=1&search=thermal")).pagination.total).toBe(1);
   });
