@@ -26,6 +26,66 @@ export const listItems = asyncHandler(async (req, res) => {
   return res.json(items);
 });
 
+const USAGE_WINDOW_DAYS = 60;
+const STOCK_TARGET_DAYS = 30;
+const RUNNING_OUT_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// GET /api/inventory/reorder
+//
+// What to buy, and how many. A part is on the list when it is at or under its
+// low-stock mark, or when the rate it has been used at over the last 60 days
+// would empty it within two weeks. The suggested quantity brings it back to a
+// month of stock at that rate, and never to less than twice its low-stock mark.
+export const reorderList = asyncHandler(async (req, res) => {
+  const now = new Date();
+  const since = new Date(now.getTime() - USAGE_WINDOW_DAYS * DAY_MS);
+  const [items, usage] = await Promise.all([
+    InventoryItem.find({ accountId: req.accountId }).sort({ name: 1 }).lean(),
+    InventoryTransaction.aggregate([
+      { $match: { accountId: new mongoose.Types.ObjectId(String(req.accountId)), type: "out", createdAt: { $gte: since } } },
+      { $group: { _id: "$itemId", used: { $sum: "$quantity" } } }
+    ])
+  ]);
+  const usedById = new Map(usage.map((row) => [String(row._id), row.used]));
+
+  const list = [];
+  for (const item of items) {
+    const used = roundMoney(usedById.get(String(item._id)) || 0);
+    const perDay = used / USAGE_WINDOW_DAYS;
+    const daysLeft = perDay > 0 ? Math.floor(item.quantity / perDay) : null;
+    const low = item.quantity <= item.lowStockThreshold;
+    const runningOut = daysLeft !== null && daysLeft <= RUNNING_OUT_DAYS;
+    if (!low && !runningOut) continue;
+
+    const target = Math.max(Math.ceil(perDay * STOCK_TARGET_DAYS), item.lowStockThreshold * 2, 1);
+    const suggested = Math.max(1, Math.ceil(target - item.quantity));
+    list.push({
+      _id: String(item._id),
+      name: item.name,
+      sku: item.sku,
+      supplier: item.supplier || "",
+      quantity: item.quantity,
+      lowStockThreshold: item.lowStockThreshold,
+      usedLast60Days: used,
+      daysLeft,
+      reason: item.quantity <= 0 ? "out" : low ? "low" : "running_out",
+      suggestedQuantity: suggested,
+      costPerUnit: roundMoney(item.costPerUnit || 0),
+      estimatedCost: roundMoney(suggested * (item.costPerUnit || 0))
+    });
+  }
+  // What runs out first comes first; parts with no recent use go last.
+  list.sort((a, b) => (a.daysLeft ?? Infinity) - (b.daysLeft ?? Infinity) || a.name.localeCompare(b.name));
+
+  return res.json({
+    generatedAt: now.toISOString(),
+    windowDays: USAGE_WINDOW_DAYS,
+    items: list,
+    estimatedTotal: roundMoney(list.reduce((sum, item) => sum + item.estimatedCost, 0))
+  });
+});
+
 export const getItem = asyncHandler(async (req, res) => {
   const id = String(req.params?.id || "").trim();
   if (!mongoose.Types.ObjectId.isValid(id)) {

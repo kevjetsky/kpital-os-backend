@@ -11,7 +11,7 @@ import app from "../app.js";
 import { Entry } from "../models/Entry.js";
 import { RecurringEntry } from "../models/RecurringEntry.js";
 import { TaxRemittance } from "../models/TaxRemittance.js";
-import { runBackup } from "../services/backupService.js";
+import { dumpDatabase, readDump, restoreDump, runBackup } from "../services/backupService.js";
 
 let mongod;
 const accountA = new mongoose.Types.ObjectId();
@@ -165,5 +165,45 @@ describe("GET /api/backup", () => {
     });
     expect(res.body.entries[0].income).toBe(100);
     expect(res.body.taxRemittances[0].amount).toBe(10);
+  });
+});
+
+describe("restoring a backup", () => {
+  const snapshot = async () =>
+    (await mongoose.connection.collection("entries").find({}).sort({ income: 1 }).toArray()).map((doc) => ({
+      id: String(doc._id),
+      account: String(doc.accountId),
+      date: doc.date.toISOString(),
+      income: doc.income
+    }));
+
+  it("brings every record back as it was, ids and dates included", async () => {
+    const before = await snapshot();
+    const { gzipped, counts } = await dumpDatabase();
+    expect(readDump(gzipped).counts).toEqual(counts);
+
+    await mongoose.connection.collection("entries").deleteMany({});
+    const result = await restoreDump(mongoose.connection.db, gzipped);
+    expect(result.restored.entries).toBe(2);
+    expect(await snapshot()).toEqual(before);
+    const [doc] = await mongoose.connection.collection("entries").find({}).toArray();
+    expect(doc._id).toBeInstanceOf(mongoose.mongo.ObjectId);
+    expect(doc.date).toBeInstanceOf(Date);
+  });
+
+  it("refuses a database that already has records, unless told to replace them", async () => {
+    const { gzipped } = await dumpDatabase();
+    await mongoose.connection.collection("entries").insertOne({ accountId: accountA, date: new Date("2026-04-01"), type: "Sales", income: 7 });
+
+    await expect(restoreDump(mongoose.connection.db, gzipped)).rejects.toThrow(/already has records in "entries"/);
+    expect(await mongoose.connection.collection("entries").countDocuments()).toBe(3);
+
+    await restoreDump(mongoose.connection.db, gzipped, { replace: true });
+    expect((await snapshot()).map((doc) => doc.income)).toEqual([50, 100]);
+  });
+
+  it("rejects a file that is not a backup", async () => {
+    const { gzipSync } = await import("node:zlib");
+    expect(() => readDump(gzipSync(JSON.stringify({ hello: "world" })))).toThrow("not a Kpital OS backup");
   });
 });

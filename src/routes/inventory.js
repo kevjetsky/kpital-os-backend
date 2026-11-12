@@ -6,6 +6,7 @@ const router = Router();
 
 router.get("/", requireAuth, inventory.listItems);
 router.post("/", requireAuth, inventory.createItem);
+router.get("/reorder", requireAuth, inventory.reorderList);
 router.get("/:id", requireAuth, inventory.getItem);
 router.put("/:id", requireAuth, inventory.updateItem);
 router.delete("/:id", requireAuth, inventory.deleteItem);

@@ -173,3 +173,27 @@ describe("deleting an inventory part", () => {
     expect(await stock()).toBe(10);
   });
 });
+
+describe("reorder list", () => {
+  it("lists parts that are low or running out, with how many to buy", async () => {
+    // HDMI PS5: 10 in stock, low mark 1. Nine go out on jobs, leaving one.
+    for (let i = 0; i < 5; i += 1) {
+      const created = await newJob(`555-01${i}0`);
+      if (i < 4) await api.put(`/entries/${created._id}`, { inventoryUsage: [{ itemId: part._id, quantity: 2 }] });
+    }
+    const idle = (await api.post("/inventory", { name: "Fan", sku: "FAN-1", quantity: 1, costPerUnit: 4, lowStockThreshold: 2 })).body;
+    await api.post("/inventory", { name: "Plenty", sku: "PL-1", quantity: 50, costPerUnit: 1, lowStockThreshold: 2 });
+
+    const res = await api.get("/inventory/reorder");
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((item) => item.name)).toEqual(["HDMI PS5", "Fan"]);
+
+    // 9 used in 60 days: the one left lasts 6 days, and a month's worth is 5.
+    const hdmi = res.body.items[0];
+    expect(hdmi).toMatchObject({ quantity: 1, usedLast60Days: 9, daysLeft: 6, reason: "low", suggestedQuantity: 4, estimatedCost: 20 });
+
+    // Under its low mark with no recent use: back up to twice the mark.
+    expect(res.body.items[1]).toMatchObject({ _id: idle._id, reason: "low", daysLeft: null, suggestedQuantity: 3, estimatedCost: 12 });
+    expect(res.body.estimatedTotal).toBe(32);
+  });
+});

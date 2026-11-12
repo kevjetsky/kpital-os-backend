@@ -5,7 +5,7 @@
 // own service account, so it needs no SDK and no stored credential. The bucket
 // must be private: the dump holds every account's records and password hashes.
 
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import mongoose from "mongoose";
 
 const METADATA_TOKEN_URL =
@@ -113,4 +113,41 @@ export async function runBackup({ env = process.env, fetchImpl = fetch, now = ne
   }
 
   return { file, bucket, bytes: gzipped.length, counts, kept: existing.length - stale.length, pruned: stale.length };
+}
+
+// Reads a dump written by dumpDatabase back into { counts, collections }.
+export function readDump(gzipped) {
+  const { EJSON } = mongoose.mongo.BSON;
+  const dump = EJSON.parse(gunzipSync(gzipped).toString("utf8"));
+  if (!dump || dump.format !== "ejson" || typeof dump.collections !== "object") {
+    throw new Error("This file is not a Kpital OS backup.");
+  }
+  return dump;
+}
+
+// Puts a dump back. Refuses a database that already holds records unless told
+// to replace them, so a restore pointed at the wrong place cannot quietly mix
+// two sets of data. With `replace`, each collection in the dump is emptied
+// first; collections the dump does not mention are left alone. Indexes are not
+// part of a dump: the app rebuilds them when it next starts.
+export async function restoreDump(db, gzipped, { replace = false } = {}) {
+  const dump = readDump(gzipped);
+  const names = Object.keys(dump.collections);
+
+  if (!replace) {
+    for (const name of names) {
+      if ((await db.collection(name).estimatedDocumentCount()) > 0) {
+        throw new Error(`The database already has records in "${name}". Nothing was restored.`);
+      }
+    }
+  }
+
+  const restored = {};
+  for (const name of names) {
+    const docs = dump.collections[name];
+    if (replace) await db.collection(name).deleteMany({});
+    if (docs.length > 0) await db.collection(name).insertMany(docs, { ordered: true });
+    restored[name] = docs.length;
+  }
+  return { exportedAt: dump.exportedAt, restored };
 }
