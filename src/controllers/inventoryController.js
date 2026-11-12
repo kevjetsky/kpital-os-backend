@@ -124,6 +124,9 @@ export const updateItem = asyncHandler(async (req, res) => {
 
   const body = req.body ?? {};
 
+  const item = await InventoryItem.findOne({ _id: id, accountId: req.accountId });
+  if (!item) return res.status(404).json({ message: "Item not found." });
+
   if (Object.prototype.hasOwnProperty.call(body, "name")) {
     const name = String(body.name || "").trim();
     if (!name) return res.status(400).json({ message: "Name is required." });

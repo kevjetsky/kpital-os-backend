@@ -396,10 +396,18 @@ export const remove = asyncHandler(async (req, res) => {
     );
   }
 
+  // Records keep what they charged: each line holds its own name and price.
+  // Only the link to the deleted product goes, on the record and on its lines,
+  // so an old job reads as a custom item and can still be edited.
   if (deleted.kind === "product_service") {
     await Entry.updateMany(
       { accountId: req.accountId, productServiceOptionId: deleted._id },
       { $set: { productServiceOptionId: null } }
+    );
+    await Entry.updateMany(
+      { accountId: req.accountId, "items.productServiceOptionId": deleted._id },
+      { $set: { "items.$[line].productServiceOptionId": null } },
+      { arrayFilters: [{ "line.productServiceOptionId": deleted._id }] }
     );
   }
 

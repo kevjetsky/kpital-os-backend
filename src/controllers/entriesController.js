@@ -508,15 +508,24 @@ async function resolveLineItems(accountId, body, { type, isB2B, existing = null 
     ? await ReferenceOption.find({ accountId, kind: "product_service", _id: { $in: ids } }).lean()
     : [];
   const byId = new Map(options.map((option) => [String(option._id), option]));
+  // Lines already on the record, by the product they were saved against. A
+  // product deleted since then is no reason to refuse an edit: the line keeps
+  // the name, type and price it was saved with and simply loses the link.
+  const savedLines = new Map(
+    plainItems(existing?.items)
+      .filter((line) => line.productServiceOptionId)
+      .map((line) => [String(line.productServiceOptionId), line])
+  );
 
   const items = [];
   for (const raw of body.items) {
     const optionId = String(raw?.productServiceOptionId || "").trim();
     if (optionId && !mongoose.Types.ObjectId.isValid(optionId)) return { error: "Invalid product/service id on a line item." };
     const option = optionId ? byId.get(optionId) : null;
-    if (optionId && !option) return { error: "A line item's product/service was not found." };
+    const saved = optionId && !option ? savedLines.get(optionId) : null;
+    if (optionId && !option && !saved) return { error: "A line item's product/service was not found." };
 
-    const name = (String(raw?.name ?? "").trim() || option?.name || "").slice(0, 160);
+    const name = (String(raw?.name ?? "").trim() || option?.name || saved?.name || "").slice(0, 160);
     if (!name) return { error: "Each line item needs a name or a product/service." };
 
     const blank = (value) => value === undefined || value === null || value === "";
@@ -526,7 +535,7 @@ async function resolveLineItems(accountId, body, { type, isB2B, existing = null 
     }
     let unitPrice;
     if (blank(raw?.unitPrice)) {
-      unitPrice = option ? priceForRecord(option, isB2B) : 0;
+      unitPrice = option ? priceForRecord(option, isB2B) : saved ? saved.unitPrice : 0;
     } else {
       const parsed = parseMoneyInput(raw.unitPrice, "Line item price");
       if (parsed.error) return { error: parsed.error };
@@ -536,7 +545,7 @@ async function resolveLineItems(accountId, body, { type, isB2B, existing = null 
     items.push({
       productServiceOptionId: option ? option._id : null,
       name,
-      optionType: option ? toProductServiceType(option.optionType) : toProductServiceType(raw?.optionType),
+      optionType: option ? toProductServiceType(option.optionType) : toProductServiceType(raw?.optionType || saved?.optionType),
       quantity: roundMoney(quantity),
       unitPrice: roundMoney(unitPrice)
     });
@@ -593,8 +602,17 @@ async function resolveRefundTaxRate(accountId, refundOf, fallbackRate) {
   return Math.min(1, Math.max(0, (original.salesTax || 0) / original.income));
 }
 
-async function normalizeInventoryUsage(accountId, input) {
+// Parts already on the record keep the name, SKU and unit cost they were saved
+// with: what a repair cost is what the part cost that day, so a later price
+// change, rename or deletion of the part must not reach back into old jobs.
+// Only a part new to the record is read from inventory at today's cost.
+async function normalizeInventoryUsage(accountId, input, previousUsage = []) {
   if (!Array.isArray(input)) return { usage: [], inventoryCost: 0, error: null };
+  const saved = new Map();
+  for (const part of previousUsage || []) {
+    const key = serializeUsageKey(part.itemId);
+    if (key && !saved.has(key)) saved.set(key, part);
+  }
 
   const aggregated = new Map();
   for (const raw of input) {
@@ -617,7 +635,7 @@ async function normalizeInventoryUsage(accountId, input) {
   let inventoryCost = 0;
 
   for (const [itemId, quantity] of aggregated) {
-    const item = itemsById.get(itemId);
+    const item = saved.get(itemId) || itemsById.get(itemId);
     if (!item) return { usage: [], inventoryCost: 0, error: "Inventory item not found." };
     const costPerUnit = roundMoney(item.costPerUnit || 0);
     const totalCost = roundMoney(quantity * costPerUnit);
@@ -662,6 +680,9 @@ async function reconcileInventoryUsage(accountId, previousUsage, nextUsage, reas
       { $inc: { quantity: quantityChange } },
       { new: false, session }
     );
+    // Stock coming back from a job has nowhere to go once its part has been
+    // deleted from inventory; the job can still be edited or deleted.
+    if (!item && delta < 0) continue;
     if (!item) throw Object.assign(new Error("Inventory item not found."), { status: 400 });
     const quantityBefore = item.quantity;
     const quantityAfter = roundMoney(quantityBefore + quantityChange);
@@ -1577,7 +1598,7 @@ async function resolveEntryInput(accountId, body, { existing = null, entryId = n
     ];
   }
   const inventory = inventoryInput !== undefined || !existing
-    ? await normalizeInventoryUsage(accountId, inventoryInput)
+    ? await normalizeInventoryUsage(accountId, inventoryInput, previousUsage)
     : { usage: existing.inventoryUsage || [], inventoryCost: Number(existing.inventoryCost || 0), error: null };
   if (inventory.error) return fail(inventory.error);
 
