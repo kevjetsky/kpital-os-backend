@@ -1,7 +1,7 @@
 // Acceptance test 16: the driveTime module against a mocked fetch (the real
 // module, with Google's Routes API faked at the HTTP level).
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { durationToMinutes, getDriveMatrix, getDriveMinutes, sentDepartureTime } from "../services/driveTime.js";
+import { clearDriveCache, durationToMinutes, getDriveMatrix, getDriveMinutes, sentDepartureTime } from "../services/driveTime.js";
 import { chicagoInstant } from "../slotFinder/time.js";
 
 const FRIDAY = "2026-11-06";
@@ -230,5 +230,41 @@ describe("16. driveTime module", () => {
     expect(await getDriveMinutes(KATY, CUSTOMER, at("12:00"), { now: NOW })).toBe(30);
     minutes = () => "not-found";
     await expect(getDriveMinutes(KATY, CUSTOMER, at("12:00"), { now: NOW })).rejects.toThrow(/No drivable route/);
+  });
+});
+
+describe("remembering answers", () => {
+  beforeEach(() => {
+    process.env.DRIVE_CACHE = "on";
+    clearDriveCache();
+  });
+  afterEach(() => {
+    process.env.DRIVE_CACHE = "off";
+    clearDriveCache();
+  });
+
+  const leg = (departAt) => ({ from: HOME, to: CUSTOMER, departAt });
+
+  it("asks Google once for the same drive in the same 15 minutes, then again once it is stale", async () => {
+    expect(await getDriveMatrix([leg(at("12:02"))], { now: NOW })).toEqual([{ minutes: 30 }]);
+    minutes = () => 99;
+    expect(await getDriveMatrix([leg(at("12:10"))], { now: NOW })).toEqual([{ minutes: 30 }]);
+    expect(calls).toHaveLength(1);
+
+    // Another quarter of an hour is another traffic estimate.
+    expect(await getDriveMatrix([leg(at("12:20"))], { now: NOW })).toEqual([{ minutes: 99 }]);
+    expect(calls).toHaveLength(2);
+
+    // Eleven minutes on, the first answer is too old to trust.
+    const later = new Date(NOW.getTime() + 11 * 60 * 1000);
+    expect(await getDriveMatrix([leg(at("12:02"))], { now: later })).toEqual([{ minutes: 99 }]);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("does not remember a failed request", async () => {
+    failWith = () => ({ ok: false, status: 500, json: async () => ({}) });
+    await expect(getDriveMatrix([leg(at("12:02"))], { now: NOW })).rejects.toThrow("Google Routes request failed.");
+    failWith = null;
+    expect(await getDriveMatrix([leg(at("12:02"))], { now: NOW })).toEqual([{ minutes: 30 }]);
   });
 });

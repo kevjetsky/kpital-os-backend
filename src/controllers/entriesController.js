@@ -553,6 +553,35 @@ async function resolveLineItems(accountId, body, { type, isB2B, existing = null 
   return { items, provided: true, error: null };
 }
 
+// ── Appointment ────────────────────────────────────────────────────────────
+
+const SCHEDULE_TIME = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+// The time of day a job is booked for and how long it should take. Only work
+// done for a customer has an appointment; anything else drops it.
+function readSchedule(body, { type, existing = null } = {}) {
+  if (!LINE_ITEM_ENTRY_TYPES.includes(type)) return { scheduledTime: "", scheduledMinutes: null, error: null };
+
+  let scheduledTime = existing?.scheduledTime || "";
+  if (bodyHas(body, "scheduledTime")) {
+    scheduledTime = String(body.scheduledTime ?? "").trim();
+    if (scheduledTime && !SCHEDULE_TIME.test(scheduledTime)) {
+      return { error: 'scheduledTime must be a time like "15:00", or empty.' };
+    }
+  }
+
+  let scheduledMinutes = existing?.scheduledMinutes ?? null;
+  if (bodyHas(body, "scheduledMinutes")) {
+    const raw = body.scheduledMinutes;
+    scheduledMinutes = raw === null || raw === "" || raw === undefined ? null : Number(raw);
+    if (scheduledMinutes !== null && (!Number.isInteger(scheduledMinutes) || scheduledMinutes < 15 || scheduledMinutes > 480)) {
+      return { error: "scheduledMinutes must be a whole number from 15 to 480." };
+    }
+  }
+
+  return { scheduledTime, scheduledMinutes: scheduledTime ? scheduledMinutes : null, error: null };
+}
+
 // ── Device ─────────────────────────────────────────────────────────────────
 
 const DEVICE_FIELDS = { deviceModel: 80, deviceSerial: 60, problemReported: 1000, deviceCondition: 1000, deviceAccessories: 300 };
@@ -1606,6 +1635,9 @@ async function resolveEntryInput(accountId, body, { existing = null, entryId = n
   if (statuses.error) return fail(statuses.error);
   const { status, jobStatus } = statuses;
 
+  const schedule = readSchedule(body, { type, existing });
+  if (schedule.error) return fail(schedule.error);
+
   const notes = has("notes") || !existing ? String(body.notes || "").trim() : existing.notes || "";
   const invoiceNote = has("invoiceNote") || !existing
     ? String(body.invoiceNote || "").trim().slice(0, 1000)
@@ -1865,6 +1897,8 @@ async function resolveEntryInput(accountId, body, { existing = null, entryId = n
       inventoryCost: inventory.inventoryCost,
       status,
       jobStatus,
+      scheduledTime: schedule.scheduledTime,
+      scheduledMinutes: schedule.scheduledMinutes,
       items: lines.items,
       ...device,
       invoiceNote,

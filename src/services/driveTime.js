@@ -34,6 +34,40 @@ const DAILY_LIMIT_REACHED =
 
 const UNREACHABLE = Object.freeze({ unreachable: true });
 
+// Answers are remembered for a few minutes, keyed by the two addresses and the
+// 15-minute window of the departure. Looking at another day, or searching the
+// same address again while on the phone with the customer, then costs none of
+// the day's drive-time allowance. Kept in memory: it only has to outlive a
+// conversation, and a restart simply asks Google again.
+const CACHE_TTL_MS = 10 * 60 * 1000;
+const CACHE_MAX = 500;
+const cache = new Map();
+const cacheOn = () => process.env.DRIVE_CACHE !== "off";
+
+export function clearDriveCache() {
+  cache.clear();
+}
+
+function cacheKeyOf(leg) {
+  const bucket = Math.floor(new Date(leg.departureTime).getTime() / BUCKET_MS);
+  return `${leg.fromKey}\n${leg.toKey}\n${bucket}`;
+}
+
+function remembered(leg, now) {
+  const hit = cache.get(cacheKeyOf(leg));
+  if (!hit) return null;
+  if (now.getTime() - hit.at > CACHE_TTL_MS) {
+    cache.delete(cacheKeyOf(leg));
+    return null;
+  }
+  return hit.result;
+}
+
+function remember(leg, now) {
+  if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
+  cache.set(cacheKeyOf(leg), { result: leg.result, at: now.getTime() });
+}
+
 export function normalizeAddress(text) {
   return String(text ?? "").trim().replace(/\s+/g, " ").toLowerCase();
 }
@@ -181,15 +215,23 @@ export async function getDriveMatrix(legs, { now = new Date() } = {}) {
     return key;
   });
 
+  const asked = [];
   const groups = new Map();
   for (const leg of unique.values()) {
     if (leg.result) continue;
+    if (cacheOn()) {
+      leg.result = remembered(leg, now);
+      if (leg.result) continue;
+    }
+    asked.push(leg);
     if (!groups.has(leg.departureTime)) groups.set(leg.departureTime, []);
     groups.get(leg.departureTime).push(leg);
   }
 
   const calls = [...groups].flatMap(([departureTime, group]) => planCalls(group, departureTime));
   await Promise.all(calls.map((call) => runCall(call, apiKey)));
+  // Only what Google answered is kept; a failed request throws before this.
+  if (cacheOn()) for (const leg of asked) if (leg.result) remember(leg, now);
 
   return keys.map((key) => {
     const { result } = unique.get(key);

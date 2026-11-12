@@ -148,6 +148,12 @@ const entrySchema = new mongoose.Schema(
       enum: ["Pending", "Completed", "Paid"],
       default: "Pending"
     },
+    // When the job is booked for, on its date: "HH:MM" in the business's own
+    // time (America/Chicago), and how long it should take. Empty on records
+    // with no appointment. A job with a time is laid out on the day's schedule
+    // and holds its place in the Slot Finder.
+    scheduledTime: { type: String, default: "", trim: true },
+    scheduledMinutes: { type: Number, default: null },
     // Where the work stands: Booked, In progress, Ready, Done. Absent on records
     // saved before it existed; those read as In progress when Pending, else Done.
     jobStatus: { type: String, enum: ["Booked", "In progress", "Ready", "Done"] }

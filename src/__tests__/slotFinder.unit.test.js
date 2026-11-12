@@ -3,7 +3,7 @@
 // them). Unless a test says otherwise, now is 06:00 America/Chicago on Friday
 // 2026-11-06 and that date is queried; buffer 10, duration 60.
 import { describe, it, expect } from "vitest";
-import { findSlots } from "../slotFinder/service.js";
+import { findSlots, searchDays } from "../slotFinder/service.js";
 import { defaultSlotFinderSettings, mergeWithDefaults } from "../slotFinder/settings.js";
 import { buildMessages, dayLabel, joinTimes } from "../slotFinder/messages.js";
 import { chicagoInstant, chicagoDateString, formatClock, toChicagoRfc3339 } from "../slotFinder/time.js";
@@ -95,7 +95,7 @@ describe("acceptance", () => {
     // 17 fails the drive in (17:05 > 17:00).
     expect(starts).toEqual(["19:00", "21:00"]);
     expect(result.state).toBe("ok");
-    expect(result.slots[0]).toEqual({ start: "19:00", driveInMin: 55, driveOutMin: null, leaveHomeBy: null });
+    expect(result.slots[0]).toMatchObject({ start: "19:00", driveInMin: 55, driveOutMin: null, leaveHomeBy: null });
     expect(result.warnings).toEqual([]);
 
     // The 13:00 slot was judged on Katy (ended 12:00) in and Katy (15:00) out.
@@ -109,7 +109,7 @@ describe("acceptance", () => {
     const { result, starts } = await run();
     expect(starts).toEqual(ALL);
     expect(result.slots.every((slot) => slot.leaveHomeBy && slot.driveOutMin === null)).toBe(true);
-    expect(result.slots[0]).toEqual({ start: "09:00", driveInMin: 30, driveOutMin: null, leaveHomeBy: "8:20 AM" });
+    expect(result.slots[0]).toMatchObject({ start: "09:00", driveInMin: 30, driveOutMin: null, leaveHomeBy: "8:20 AM" });
     expect(result.messageEn.startsWith("Hi, thanks for reaching out. For today I have availability at")).toBe(true);
     expect(result.messageEn).toBe(
       "Hi, thanks for reaching out. For today I have availability at 9:00 AM, 11:00 AM, 1:00 PM, 3:00 PM, 5:00 PM, 7:00 PM, and 9:00 PM. Which one works best for you? Once you pick, I will confirm the booking."
@@ -129,7 +129,7 @@ describe("acceptance", () => {
     });
     expect(starts).not.toContain("13:00");
     const slot = result.slots.find((s) => s.start === "15:00");
-    expect(slot).toEqual({ start: "15:00", driveInMin: 40, driveOutMin: null, leaveHomeBy: null });
+    expect(slot).toMatchObject({ start: "15:00", driveInMin: 40, driveOutMin: null, leaveHomeBy: null });
     // PREV for 15:00 is the Katy job, departing when it ends.
     expect(routeCalls[1].legs).toContainEqual({ from: KATY, to: PASADENA, departAt: at(FRIDAY, "12:00") });
   });
@@ -210,7 +210,7 @@ describe("acceptance", () => {
   it("12. leave-home-by already past", async () => {
     const { result, starts } = await run({ now: at(FRIDAY, "15:30"), drives: { "home>pasadena": 100 } });
     expect(starts).toEqual(["19:00", "21:00"]);
-    expect(result.slots[0]).toEqual({ start: "19:00", driveInMin: 100, driveOutMin: null, leaveHomeBy: "5:10 PM" });
+    expect(result.slots[0]).toMatchObject({ start: "19:00", driveInMin: 100, driveOutMin: null, leaveHomeBy: "5:10 PM" });
   });
 
   it("13. message joining", () => {
@@ -262,7 +262,7 @@ describe("neighbors and decision rules", () => {
   it("an event before 09:00 is still PREV", async () => {
     // 08:20 + 30 + 10 = 09:00 exactly.
     const { result } = await run({ items: [timed("07:00", "08:20", { location: KATY })] });
-    expect(result.slots[0]).toEqual({ start: "09:00", driveInMin: 30, driveOutMin: null, leaveHomeBy: null });
+    expect(result.slots[0]).toMatchObject({ start: "09:00", driveInMin: 30, driveOutMin: null, leaveHomeBy: null });
   });
 
   it("an event after 21:00 is still NEXT", async () => {
@@ -398,5 +398,123 @@ describe("helpers", () => {
     const [day] = normalizeEvents([allDay(FRIDAY, "2026-11-07")]);
     expect(day.start).toEqual(at(FRIDAY, "00:00"));
     expect(day.end).toEqual(at("2026-11-07", "00:00"));
+  });
+});
+
+describe("the day's last job, ranking and far addresses", () => {
+  it("prices the drive home for a slot with nothing after it, and not for one with a job after", async () => {
+    const { result } = await run({
+      items: [timed("15:00", "16:00", { location: KATY })],
+      drives: { "pasadena>home": 35, "pasadena>katy": 20, "katy>pasadena": 20 }
+    });
+    const last = result.slots.find((slot) => slot.start === "21:00");
+    expect(last).toMatchObject({ driveHomeMin: 35, homeAt: "10:35 PM", driveTotalMin: 20 + 35 });
+    const before = result.slots.find((slot) => slot.start === "13:00");
+    expect(before).toMatchObject({ driveOutMin: 20, driveHomeMin: null, homeAt: null });
+  });
+
+  it("drops a slot that would end the day after the home-by time, and says why", async () => {
+    const settings = { ...defaultSlotFinderSettings(), homeBy: "22:30" };
+    const { starts, result } = await run({ settings, drives: { "pasadena>home": 35 } });
+    expect(starts).toEqual(["09:00", "11:00", "13:00", "15:00", "17:00", "19:00"]);
+    expect(result.warnings).toContain(
+      "The 9:00 PM slot was not offered: it would get you home around 10:35 PM, after your 10:30 PM limit."
+    );
+
+    // A limit after midnight is the next morning's.
+    const late = await run({ settings: { ...defaultSlotFinderSettings(), homeBy: "00:30" }, drives: { "pasadena>home": 35 } });
+    expect(late.starts).toEqual(ALL);
+  });
+
+  it("recommends the slot with the least driving around it", async () => {
+    // Between two Katy jobs the drives are short; every other slot has a leg to or from home.
+    const { result } = await run({
+      customer: address("katy2"),
+      items: [timed("11:00", "12:00", { location: KATY }), timed("15:00", "16:00", { location: KATY })],
+      drives: { "katy>katy2": 5, "katy2>katy": 5, "home>katy2": 40, "katy2>home": 40 }
+    });
+    const recommended = result.slots.filter((slot) => slot.recommended).map((slot) => slot.start);
+    expect(recommended).toEqual(["13:00"]);
+    expect(result.slots.find((slot) => slot.start === "13:00").driveTotalMin).toBe(10);
+    expect(result.slots.find((slot) => slot.start === "09:00").driveTotalMin).toBe(45);
+
+    // When every slot costs the same drive, none is singled out.
+    const even = await run();
+    expect(even.result.slots.some((slot) => slot.recommended)).toBe(false);
+  });
+
+  it("flags an address past the far-drive mark, and stays quiet inside it", async () => {
+    const far = await run({ drives: { "home>pasadena": 50 } });
+    expect(far.result.farAway).toEqual({ driveMinutes: 50, limitMinutes: 45 });
+    expect(far.result.warnings[0]).toContain("about 50 minutes from home base");
+
+    expect((await run()).result.farAway).toBeNull();
+    const off = await run({ drives: { "home>pasadena": 50 }, settings: { ...defaultSlotFinderSettings(), farDriveMinutes: 0 } });
+    expect(off.result.farAway).toBeNull();
+  });
+});
+
+describe("several days", () => {
+  const deps = (itemsByDay = {}) => {
+    const calendar = [];
+    const routes = [];
+    return {
+      calendar,
+      routes,
+      fetchCalendarItems: async (day) => {
+        calendar.push(day);
+        return itemsByDay[day] || [];
+      },
+      getDriveMatrix: async (legs) => {
+        routes.push(legs);
+        return legs.map(() => ({ minutes: 30 }));
+      }
+    };
+  };
+  const search = (input, d) =>
+    searchDays({ date: FRIDAY, address: PASADENA, durationMinutes: 60, settings: defaultSlotFinderSettings(), now: NOW, ...input }, d);
+
+  it("checks one day in full and only looks at the calendar for the four after it", async () => {
+    const d = deps({ "2026-11-07": [timed("09:00", "12:30", { date: "2026-11-07" })] });
+    const result = await search({}, d);
+
+    expect(result.date).toBe(FRIDAY);
+    expect(result.days.map((day) => day.date)).toEqual([FRIDAY]);
+    expect(result.upcoming.map((day) => [day.date, day.freeSlots])).toEqual([
+      ["2026-11-07", 5],
+      ["2026-11-08", 7],
+      ["2026-11-09", 7],
+      ["2026-11-10", 7]
+    ]);
+    expect(result.upcoming[0]).toMatchObject({ dayLabel: "tomorrow", starts: ["13:00", "15:00", "17:00", "19:00", "21:00"] });
+    // Drive times were asked for the one day only.
+    expect(d.calendar).toHaveLength(5);
+    const asked = d.routes.flat().map((leg) => chicagoDateString(leg.departAt));
+    expect(new Set(asked)).toEqual(new Set([FRIDAY]));
+  });
+
+  it("checks up to three days in full and writes one line per day with openings", async () => {
+    const d = deps({ "2026-11-07": [allDay("2026-11-07", "2026-11-08")] });
+    const result = await search({ days: 3 }, d);
+
+    expect(result.days.map((day) => [day.date, day.state])).toEqual([
+      [FRIDAY, "ok"],
+      ["2026-11-07", "no_slots"],
+      ["2026-11-08", "ok"]
+    ]);
+    expect(result.summaryEn.split("\n")).toEqual([
+      "Today: 9:00 AM, 11:00 AM, 1:00 PM, 3:00 PM, 5:00 PM, 7:00 PM, and 9:00 PM",
+      "Sunday, Nov 8: 9:00 AM, 11:00 AM, 1:00 PM, 3:00 PM, 5:00 PM, 7:00 PM, and 9:00 PM"
+    ]);
+    expect(result.summaryEs.split("\n")[0]).toMatch(/^Hoy: /);
+    expect(result.upcoming[0].date).toBe("2026-11-09");
+    expect((await search({ days: 9 }, deps())).days).toHaveLength(3);
+  });
+
+  it("looks nothing else up for a past date", async () => {
+    const d = deps();
+    const result = await search({ date: "2026-11-05" }, d);
+    expect(result).toMatchObject({ state: "past_date", upcoming: [], summaryEn: null });
+    expect(d.calendar).toHaveLength(0);
   });
 });

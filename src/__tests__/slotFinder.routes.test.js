@@ -174,10 +174,10 @@ describe("acceptance through the API", () => {
     const log = fakeGoogle({ items: TEST1_EVENTS, drives: TEST1_DRIVES });
     const viaGet = await find({ date: FRIDAY, address: PASADENA, duration: "60" });
     expect(viaGet.status).toBe(200);
-    expect(viaGet.body).toEqual(TEST1_BODY);
+    expect(viaGet.body).toMatchObject(TEST1_BODY);
 
     const viaPost = await findPost({ date: FRIDAY, address: PASADENA, duration: 60 });
-    expect(viaPost.body).toEqual(TEST1_BODY);
+    expect(viaPost.body).toMatchObject(TEST1_BODY);
 
     // The calendar was asked for the whole Chicago day, recurring events expanded.
     const { url, headers } = log.calendar[0];
@@ -204,7 +204,8 @@ describe("acceptance through the API", () => {
     const log = fakeGoogle({ pages: [[TEST1_EVENTS[0]], [TEST1_EVENTS[1]], [TEST1_EVENTS[2]]], drives: TEST1_DRIVES });
     const res = await find({ date: FRIDAY, address: PASADENA });
     expect(res.body.slots.map((s) => s.start)).toEqual(["19:00", "21:00"]);
-    expect(log.calendar).toHaveLength(3);
+    // Three pages for the day asked about, and for each of the four days after it.
+    expect(log.calendar).toHaveLength(15);
     expect(log.calendar[0].url.pathname).toBe("/calendar/v3/calendars/owner%40example.com/events");
   });
 
@@ -381,7 +382,40 @@ describe("settings", () => {
 
     fakeGoogle({ items: [timed("08:00", "15:00", { location: KATY })] });
     const res = await find({ date: FRIDAY, address: PASADENA });
-    expect(res.body.slots).toEqual([{ start: "16:00", driveInMin: 30, driveOutMin: null, leaveHomeBy: null }]);
+    expect(res.body.slots).toMatchObject([{ start: "16:00", driveInMin: 30, driveOutMin: null, leaveHomeBy: null }]);
     expect(res.body.messageEn).toBe("Free today at 4:00 PM.");
+  });
+});
+
+describe("jobs booked in the app", () => {
+  const book = (body) =>
+    authed(request(app).post("/api/entries")).send({ type: "Repair", date: FRIDAY, description: "HDMI port", income: 100, customerPhone: "555-0101", ...body });
+
+  it("stores a time and length on a job, and refuses a bad one", async () => {
+    const res = await book({ scheduledTime: "13:00", scheduledMinutes: 90, jobStatus: "Booked" });
+    expect(res.status).toBe(201);
+    expect(res.body).toMatchObject({ scheduledTime: "13:00", scheduledMinutes: 90 });
+
+    expect((await book({ scheduledTime: "1pm" })).status).toBe(400);
+    expect((await book({ scheduledTime: "13:00", scheduledMinutes: 5 })).status).toBe(400);
+
+    // Clearing the time clears the length, and an expense never has one.
+    const cleared = await authed(request(app).put(`/api/entries/${res.body._id}`)).send({ scheduledTime: "" });
+    expect(cleared.body).toMatchObject({ scheduledTime: "", scheduledMinutes: null });
+    const expense = await authed(request(app).post("/api/entries")).send({ type: "Expenses", date: FRIDAY, description: "Solder", expense: 5, scheduledTime: "13:00" });
+    expect(expense.body.scheduledTime).toBe("");
+  });
+
+  it("hold their time in the Slot Finder until the work is finished", async () => {
+    fakeGoogle();
+    const job = await book({ scheduledTime: "13:00", scheduledMinutes: 90, jobStatus: "Booked", customerAddress: KATY });
+    const res = await find({ date: FRIDAY, address: PASADENA });
+    // 13:00 to 14:30 is taken, and the drive over from it rules out 15:00 too.
+    expect(res.body.slots.map((s) => s.start)).toEqual(["09:00", "11:00", "17:00", "19:00", "21:00"]);
+    expect(res.body.slots.find((s) => s.start === "17:00")).toMatchObject({ leaveHomeBy: null });
+
+    await authed(request(app).put(`/api/entries/${job.body._id}`)).send({ jobStatus: "Done" });
+    const after = await find({ date: FRIDAY, address: PASADENA });
+    expect(after.body.slots.map((s) => s.start)).toContain("13:00");
   });
 });

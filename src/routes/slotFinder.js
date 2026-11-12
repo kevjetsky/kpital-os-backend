@@ -2,7 +2,8 @@ import { Router } from "express";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { requireAuth } from "../middleware/auth.js";
 import { SlotFinderError, missingEnv } from "../slotFinder/errors.js";
-import { findSlots } from "../slotFinder/service.js";
+import { searchDays } from "../slotFinder/service.js";
+import { listBookedJobEvents } from "../slotFinder/bookedJobs.js";
 import {
   DEFAULT_DURATION,
   MAX_DURATION,
@@ -97,8 +98,20 @@ async function search(req, res, input) {
       }
     }
 
+    const rawDays = single(input.days);
+    let days = 1;
+    if (rawDays !== undefined && rawDays !== null && rawDays !== "") {
+      days = Number(rawDays);
+      if (!Number.isInteger(days) || days < 1 || days > 3) throw new SlotFinderError("days must be 1, 2 or 3.");
+    }
+
     res.set("Cache-Control", "no-store");
-    return res.json(await findSlots({ date, address, durationMinutes, settings }));
+    return res.json(
+      await searchDays(
+        { date, days, address, durationMinutes, settings },
+        { fetchBookedJobs: (day) => listBookedJobEvents(req.accountId, day) }
+      )
+    );
   } catch (error) {
     return handleError(res, error);
   }
