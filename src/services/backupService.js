@@ -7,10 +7,8 @@
 
 import { gunzipSync, gzipSync } from "node:zlib";
 import mongoose from "mongoose";
+import { STORAGE_API, accessToken, storageRequest } from "./cloudStorage.js";
 
-const METADATA_TOKEN_URL =
-  "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token";
-const STORAGE_API = "https://storage.googleapis.com";
 const PREFIX = "kpital-backup-";
 const DEFAULT_KEEP = 30;
 
@@ -43,26 +41,6 @@ export async function dumpDatabase(db = mongoose.connection.db) {
     { relaxed: true }
   );
   return { counts, gzipped: gzipSync(body) };
-}
-
-async function accessToken(fetchImpl) {
-  const res = await fetchImpl(METADATA_TOKEN_URL, { headers: { "Metadata-Flavor": "Google" } });
-  if (!res.ok) throw new Error(`Could not get a storage token: HTTP ${res.status}`);
-  const { access_token: token } = await res.json();
-  if (!token) throw new Error("Could not get a storage token: empty response.");
-  return token;
-}
-
-async function storageRequest(fetchImpl, token, url, init = {}) {
-  const res = await fetchImpl(url, {
-    ...init,
-    headers: { Authorization: `Bearer ${token}`, ...(init.headers || {}) }
-  });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    throw new Error(`Cloud Storage ${init.method || "GET"} failed: HTTP ${res.status} ${detail.slice(0, 200)}`);
-  }
-  return res;
 }
 
 async function listBackups(fetchImpl, token, bucket) {

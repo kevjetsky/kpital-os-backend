@@ -36,6 +36,7 @@ import {
   isPlaceholderName
 } from "../utils.js";
 import { nextInvoiceNumber } from "../models/InvoiceCounter.js";
+import { deleteReceipt } from "../services/receiptService.js";
 import { parseAddressText, resolveAddress } from "../services/geoService.js";
 import {
   ENTRY_TYPES,
@@ -2042,6 +2043,8 @@ export const remove = asyncHandler(async (req, res) => {
   if (!deleted) {
     return res.status(404).json({ message: "Entry not found." });
   }
+  // The record is gone; its receipt photo goes with it.
+  if (deleted.receipt?.path) await deleteReceipt(deleted.receipt.path);
   return res.json({ ok: true });
 });
 

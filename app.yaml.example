@@ -16,6 +16,10 @@ env_variables:
   # Shared secret for the recurring-entries cron. Must match CRON_SECRET set on
   # the Cloudflare MCP worker (wrangler secret put CRON_SECRET).
   CRON_SECRET: "your-cron-secret-here"
+  # Private Cloud Storage bucket for receipt photos on expenses. Leave unset to
+  # switch receipt photos off. The App Engine service account needs Storage
+  # Object Admin on it.
+  RECEIPTS_BUCKET: "your-project-receipts"
   # Private Cloud Storage bucket the nightly backup writes to. Leave unset to
   # switch the backup off. The App Engine service account needs Storage Object
   # Admin on it. BACKUP_KEEP is how many nightly dumps to keep (default 30).

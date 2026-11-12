@@ -1,3 +1,6 @@
+import express from "express";
+import * as receipts from "../controllers/receiptsController.js";
+import { MAX_RECEIPT_BYTES } from "../services/receiptService.js";
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
 import * as entries from "../controllers/entriesController.js";
@@ -17,6 +20,15 @@ router.put("/:id", requireAuth, entries.update);
 router.delete("/:id", requireAuth, entries.remove);
 router.get("/:id/sms", requireAuth, sms.listForEntry);
 router.post("/:id/sms/resend", requireAuth, sms.resend);
+// The photo is the body. express.json (mounted app-wide) leaves image types alone.
+router.post(
+  "/:id/receipt",
+  requireAuth,
+  express.raw({ type: ["image/jpeg", "image/png", "image/webp"], limit: MAX_RECEIPT_BYTES }),
+  receipts.upload
+);
+router.get("/:id/receipt", requireAuth, receipts.view);
+router.delete("/:id/receipt", requireAuth, receipts.remove);
 router.post("/:id/payments", requireAuth, entries.addPayment);
 router.delete("/:id/payments/:paymentId", requireAuth, entries.deletePayment);
 

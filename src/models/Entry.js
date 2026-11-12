@@ -148,6 +148,20 @@ const entrySchema = new mongoose.Schema(
       enum: ["Pending", "Completed", "Paid"],
       default: "Pending"
     },
+    // A photo of the paper receipt, for expenses. The image lives in the private
+    // receipts bucket; this is only where to find it.
+    receipt: {
+      type: new mongoose.Schema(
+        {
+          path: { type: String, required: true },
+          contentType: { type: String, default: "image/jpeg" },
+          size: { type: Number, default: 0 },
+          uploadedAt: { type: Date, default: Date.now }
+        },
+        { _id: false }
+      ),
+      default: undefined
+    },
     // When the job is booked for, on its date: "HH:MM" in the business's own
     // time (America/Chicago), and how long it should take. Empty on records
     // with no appointment. A job with a time is laid out on the day's schedule
