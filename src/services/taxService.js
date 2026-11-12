@@ -133,7 +133,7 @@ export async function getYearEndPackage(accountId, year) {
     date: { $gte: new Date(Date.UTC(year, 0, 1)), $lt: new Date(Date.UTC(year + 1, 0, 1)) }
   };
 
-  const [byMonthAndType, byCategory, liability] = await Promise.all([
+  const [byMonthAndType, byCategory, liability, years] = await Promise.all([
     Entry.aggregate([
       { $match: match },
       {
@@ -152,11 +152,15 @@ export async function getYearEndPackage(accountId, year) {
       { $match: { ...match, type: "Expenses" } },
       { $group: { _id: "$category", amount: { $sum: "$expense" }, count: { $sum: 1 } } }
     ]),
-    getLiability(accountId, year)
+    getLiability(accountId, year),
+    Entry.aggregate([
+      { $match: { accountId: toAccountObjectId(accountId) } },
+      { $group: { _id: { $year: { date: "$date", timezone: "UTC" } } } }
+    ])
   ]);
 
   const blank = () => ({
-    repairs: 0, sales: 0, refunds: 0, parts: 0, otherJobCosts: 0, operatingExpenses: 0, payroll: 0, ownerDraws: 0, exempt: 0
+    repairs: 0, sales: 0, refunds: 0, parts: 0, otherJobCosts: 0, operatingExpenses: 0, payroll: 0, ownerDraws: 0, exempt: 0, records: 0
   });
   const months = MONTH_NAMES.map(() => blank());
   const counts = { jobs: 0, refunds: 0, expenses: 0, payroll: 0, ownerDraws: 0 };
@@ -164,6 +168,7 @@ export async function getYearEndPackage(accountId, year) {
   for (const row of byMonthAndType) {
     const month = months[row._id.month - 1];
     const type = row._id.type;
+    month.records += row.count;
     if (JOB_TYPES.includes(type)) {
       month[type === "Repair" ? "repairs" : "sales"] += row.income;
       month.parts += row.parts;
@@ -236,6 +241,28 @@ export async function getYearEndPackage(accountId, year) {
       quarters: liability.quarters,
       totals: liability.totals
     },
+    // The sales tax return, quarter by quarter: what was sold, what came back,
+    // what was exempt, and so what tax was due on.
+    taxReport: [1, 2, 3, 4].map((quarter) => {
+      const sum = months.slice((quarter - 1) * 3, quarter * 3).reduce((total, month) => {
+        for (const key of Object.keys(total)) total[key] += month[key];
+        return total;
+      }, blank());
+      const grossIncome = roundMoney(sum.repairs + sum.sales);
+      const refunds = roundMoney(sum.refunds);
+      const exempt = roundMoney(sum.exempt);
+      return {
+        quarter,
+        records: sum.records,
+        grossIncome,
+        refunds,
+        exempt,
+        taxable: roundMoney(grossIncome - refunds - exempt),
+        salesTax: liability.quarters[quarter - 1].collected
+      };
+    }),
+    // Every year the account has records in, newest first, for the year picker.
+    availableYears: years.map((row) => row._id).filter(Number.isInteger).sort((a, b) => b - a),
     months: months.map((month, index) => ({
       month: index + 1,
       label: MONTH_NAMES[index],

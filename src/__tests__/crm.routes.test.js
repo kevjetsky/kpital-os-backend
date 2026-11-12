@@ -468,6 +468,10 @@ describe("year-end tax package", () => {
     expect(res.body.salesTax.quarters[0]).toMatchObject({ collected: 16.5, remitted: 16.5, owed: 0 });
     expect(res.body.salesTax.quarters[1]).toMatchObject({ collected: 0 });
 
+    expect(res.body.taxReport[0]).toEqual({ quarter: 1, records: 2, grossIncome: 200, refunds: 0, exempt: 0, taxable: 200, salesTax: 16.5 });
+    expect(res.body.taxReport[1]).toEqual({ quarter: 2, records: 2, grossIncome: 60, refunds: 60, exempt: 0, taxable: 0, salesTax: 0 });
+    expect(res.body.availableYears).toEqual([2026, 2025]);
+
     expect(res.body.months).toHaveLength(12);
     expect(res.body.months[1]).toMatchObject({ label: "Feb", grossIncome: 200, costOfGoods: 15, expenses: 40, netProfit: 145 });
     expect(res.body.months.reduce((sum, month) => sum + month.netProfit, 0)).toBe(20);
