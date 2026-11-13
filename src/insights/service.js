@@ -206,11 +206,12 @@ export async function insights(accountId, now = new Date()) {
 }
 
 /**
- * The working day: today's jobs in full (for the schedule and the route map),
- * plus how many jobs are waiting to be handed back and what is still owed.
+ * A working day (today unless a YYYY-MM-DD date is given): its jobs in full,
+ * for the schedule and the route, plus how many jobs are waiting to be handed
+ * back and what is still owed overall.
  */
-export async function today(accountId, now = new Date()) {
-  const day = businessToday(now);
+export async function today(accountId, now = new Date(), date = null) {
+  const day = date || businessToday(now);
   const [jobs, open] = await Promise.all([
     Entry.find({ accountId, date: new Date(`${day}T00:00:00.000Z`), type: { $in: JOB_TYPES } })
       .sort({ scheduledTime: 1, createdAt: 1 })

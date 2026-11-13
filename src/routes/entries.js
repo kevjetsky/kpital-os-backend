@@ -20,6 +20,7 @@ router.get("/insights", requireAuth, insights.getInsights);
 router.get("/today", requireAuth, insights.getToday);
 router.get("/related", requireAuth, insights.getRelated);
 router.get("/area-points", requireAuth, insights.getAreaPoints);
+router.get("/route-plan", requireAuth, insights.getRoutePlan);
 // After every fixed path above, so "/summary" and the rest are never read as an id.
 router.get("/:id", requireAuth, entries.getOne);
 router.post("/", requireAuth, entries.create);
