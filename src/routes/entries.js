@@ -4,6 +4,7 @@ import { MAX_RECEIPT_BYTES } from "../services/receiptService.js";
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
 import * as entries from "../controllers/entriesController.js";
+import * as insights from "../controllers/insightsController.js";
 import * as sms from "../controllers/smsController.js";
 
 const router = Router();
@@ -15,6 +16,12 @@ router.get("/refund-candidates", requireAuth, entries.refundCandidates);
 router.get("/callback-stats", requireAuth, entries.callbackStats);
 router.get("/business-statement", requireAuth, entries.businessStatement);
 router.get("/area-stats", requireAuth, entries.areaStats);
+router.get("/insights", requireAuth, insights.getInsights);
+router.get("/today", requireAuth, insights.getToday);
+router.get("/related", requireAuth, insights.getRelated);
+router.get("/area-points", requireAuth, insights.getAreaPoints);
+// After every fixed path above, so "/summary" and the rest are never read as an id.
+router.get("/:id", requireAuth, entries.getOne);
 router.post("/", requireAuth, entries.create);
 router.put("/:id", requireAuth, entries.update);
 router.delete("/:id", requireAuth, entries.remove);

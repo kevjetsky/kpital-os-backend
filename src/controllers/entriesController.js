@@ -1920,6 +1920,18 @@ async function resolveEntryInput(accountId, body, { existing = null, entryId = n
 const invoiceNumberFor = (accountId, type, session) =>
   INVOICED_ENTRY_TYPES.includes(type) ? nextInvoiceNumber(accountId, session) : Promise.resolve("");
 
+// GET /api/entries/:id — one record, as the lists send it.
+export const getOne = asyncHandler(async (req, res) => {
+  const entryId = String(req.params?.id || "").trim();
+  if (!mongoose.Types.ObjectId.isValid(entryId)) {
+    return res.status(400).json({ message: "Invalid entry id." });
+  }
+  const entry = await Entry.findOne({ _id: entryId, accountId: req.accountId }).lean();
+  if (!entry) return res.status(404).json({ message: "Entry not found." });
+  const [withLinks] = await attachRefundLinks(req.accountId, [entry]);
+  return res.json(withLinks);
+});
+
 export const create = asyncHandler(async (req, res) => {
   const input = await resolveEntryInput(req.accountId, req.body ?? {});
   if (input.error) {
