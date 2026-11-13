@@ -1,4 +1,4 @@
-name: Test backend
+name: Test and deploy backend
 
 on:
   push:
@@ -33,3 +33,50 @@ jobs:
 
       - name: Run tests
         run: npm test
+
+  # Runs only after the tests pass on a push to main, and only once
+  # scripts/setup-github-deploy.sh has been run (it sets DEPLOY_ENABLED). Signs
+  # in to Google without a stored key, through Workload Identity Federation,
+  # and reads the private app.yaml from Secret Manager at deploy time.
+  deploy:
+    name: Deploy to App Engine
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-backend
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Sign in to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/1042978468972/locations/global/workloadIdentityPools/github/providers/github-actions
+          service_account: github-deployer@kpital-os.iam.gserviceaccount.com
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Fetch the private config
+        run: gcloud secrets versions access latest --secret=backend-app-yaml --project=kpital-os > app.yaml
+
+      - name: Deploy
+        run: gcloud app deploy app.yaml --project=kpital-os --quiet
+
+      - name: Check it answers
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            if curl -fsS https://api.kpitaltech.com/api/health; then exit 0; fi
+            sleep 10
+          done
+          exit 1
+
+      - name: Remove the config
+        if: always()
+        run: rm -f app.yaml
