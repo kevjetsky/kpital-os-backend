@@ -268,9 +268,13 @@ const AREA_FIELDS =
   "_id date type income expense netProfit customerPhone customerOptionId customerInstagram customerAddress businessOptionId " +
   "addressZip addressCity addressState addressNeighborhood addressLat addressLng";
 
-/** Only the records with a place on them, and only what the Areas screen reads. */
+/**
+ * Every sale, repair and refund, carrying only where it was and what it made:
+ * the Areas screen needs the ones with no address too, to say how many jobs
+ * it cannot place.
+ */
 export function areaPoints(accountId) {
-  return Entry.find({ accountId, $or: [{ addressZip: { $gt: "" } }, { addressLat: { $ne: null } }] })
+  return Entry.find({ accountId, type: { $in: JOB_TYPES } })
     .select(AREA_FIELDS)
     .sort({ date: -1 })
     .lean();

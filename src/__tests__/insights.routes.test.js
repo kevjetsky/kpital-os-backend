@@ -147,15 +147,16 @@ describe("routes", () => {
     expect((await get("/entries/summary?from=2026-10-01&to=2026-10-31")).status).toBe(200);
   });
 
-  it("sends only placed records, with only what the Areas screen needs", async () => {
+  it("sends every job with only what the Areas screen needs, and no expenses", async () => {
     await Entry.create([
       { accountId: (await Settings.findOne({ key: "main" }))._id, date: new Date("2026-10-01"), type: "Repair", income: 100, netProfit: 100, addressZip: "77072", addressLat: 29.7, addressLng: -95.5, notes: "secret" },
-      { accountId: (await Settings.findOne({ key: "main" }))._id, date: new Date("2026-10-02"), type: "Repair", income: 50, netProfit: 50 }
+      { accountId: (await Settings.findOne({ key: "main" }))._id, date: new Date("2026-10-02"), type: "Repair", income: 50, netProfit: 50 },
+      { accountId: (await Settings.findOne({ key: "main" }))._id, date: new Date("2026-10-03"), type: "Expenses", expense: 9, netProfit: -9, addressZip: "77001" }
     ]);
     const res = await get("/entries/area-points");
-    expect(res.body).toHaveLength(1);
-    expect(res.body[0]).toMatchObject({ addressZip: "77072", addressLat: 29.7, income: 100 });
-    expect(res.body[0]).not.toHaveProperty("notes");
+    expect(res.body.map((point) => point.income)).toEqual([50, 100]);
+    expect(res.body[1]).toMatchObject({ addressZip: "77072", addressLat: 29.7 });
+    expect(res.body[1]).not.toHaveProperty("notes");
   });
 
   it("keeps each account's numbers to itself", async () => {
