@@ -1,37 +1,92 @@
 // A day's visits laid end to end: when to leave home, the drive into each stop,
 // whether it can be reached in time, and when you are back.
 //
+// The stops come from Google Calendar, where visits are booked: every timed
+// event with a location. Jobs in Kpital OS are logged once the work is done,
+// so a stop with a job at the same address that day counts as done, and an
+// older job at that address supplies the customer's name and phone.
+//
 // Drives are priced with the same Google Routes service the Slot Finder uses,
-// in one batch, each leg at the time it would start. A stop with an
-// appointment time keeps it; a stop without one starts as soon as you get there.
+// in one batch, each leg at the time it would start.
 import { Entry } from "../models/Entry.js";
 import { getDriveMatrix as routesDriveMatrix } from "../services/driveTime.js";
-import { addMinutes, chicagoInstant, formatClock, formatSlotTime } from "../slotFinder/time.js";
+import { listDayEvents, normalizeEvents } from "../services/googleCalendar.js";
+import { resolveAddress } from "../services/geoService.js";
+import { addMinutes, chicagoInstant, chicagoTime, formatClock, formatSlotTime } from "../slotFinder/time.js";
 
 const VISIT_TYPES = ["Repair", "Sales"];
-const DEFAULT_MINUTES = 60;
+const MIN_MINUTES = 15;
 // A leg into a stop that has no time yet is priced as if it set off an hour before.
 const FIRST_PASS_MINUTES = 60;
 
-/** The day's visits in order: appointment time first, earliest first, then the rest as booked. */
-export async function dayStops(accountId, date) {
-  const jobs = await Entry.find({
+/**
+ * The street line of an address, for matching a calendar location to a job:
+ * "123 Main St., Dallas, TX 75201, USA" and "123 main st" are the same place.
+ */
+export function streetKey(address) {
+  const first = String(address ?? "").split(",")[0];
+  return first.toLowerCase().replace(/[.#]/g, "").replace(/\s+/g, " ").trim();
+}
+
+const escapeRegex = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+async function placeOf(address) {
+  try {
+    const place = await resolveAddress(address);
+    return { lat: place?.lat ?? null, lng: place?.lng ?? null };
+  } catch {
+    return { lat: null, lng: null };
+  }
+}
+
+/**
+ * The day's visits from the calendar, in time order. Timed events without a
+ * location cannot be driven to, so they come back separately as `unrouted`.
+ */
+export async function calendarStops(accountId, date, { fetchCalendarItems = listDayEvents } = {}) {
+  const events = normalizeEvents(await fetchCalendarItems(date)).filter((event) => !event.allDay);
+  const located = events.filter((event) => event.location);
+  const unrouted = events
+    .filter((event) => !event.location)
+    .map((event) => ({ title: event.summary || "No title", time: chicagoTime(event.start) }));
+
+  // Jobs logged that day, by street: those stops are done.
+  const logged = await Entry.find({
     accountId,
     date: new Date(`${date}T00:00:00.000Z`),
     type: { $in: VISIT_TYPES },
     customerAddress: { $gt: "" }
   })
-    .select("_id scheduledTime scheduledMinutes customerAddress createdAt jobStatus status")
+    .select("_id customerAddress")
     .lean();
-  const timed = jobs.filter((job) => job.scheduledTime).sort((a, b) => a.scheduledTime.localeCompare(b.scheduledTime));
-  const untimed = jobs.filter((job) => !job.scheduledTime).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
-  return [...timed, ...untimed].map((job, index) => ({
-    _id: String(job._id),
-    order: index + 1,
-    address: job.customerAddress.trim(),
-    scheduledTime: job.scheduledTime || "",
-    minutes: job.scheduledMinutes || DEFAULT_MINUTES
-  }));
+  const loggedByStreet = new Map(logged.map((job) => [streetKey(job.customerAddress), String(job._id)]));
+
+  const stops = await Promise.all(
+    located.map(async (event, index) => {
+      const key = streetKey(event.location);
+      // Who lives there: the latest job at the same street line, if any.
+      const known = key
+        ? await Entry.findOne({ accountId, customerAddress: { $regex: `^\\s*${escapeRegex(key).replace(/ /g, "\\s+")}`, $options: "i" } })
+            .sort({ date: -1, createdAt: -1 })
+            .select("customerName customerPhone")
+            .lean()
+        : null;
+      const place = await placeOf(event.location);
+      return {
+        _id: `${event.start.toISOString()}|${key}`,
+        order: index + 1,
+        title: event.summary || "No title",
+        address: event.location,
+        scheduledTime: chicagoTime(event.start),
+        minutes: Math.max(MIN_MINUTES, Math.round((event.end - event.start) / 60000)),
+        entryId: loggedByStreet.get(key) ?? null,
+        customerName: known?.customerName || "",
+        customerPhone: known?.customerPhone || "",
+        ...place
+      };
+    })
+  );
+  return { stops, unrouted };
 }
 
 const clock = (instant) => (instant ? formatClock(instant) : null);
@@ -102,9 +157,8 @@ function nextDay(date) {
   return new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
 }
 
-/** Prices every leg in one batch and lays the day out. */
-export async function routePlan({ accountId, date, settings, now = new Date() }, { getDriveMatrix = routesDriveMatrix } = {}) {
-  const stops = await dayStops(accountId, date);
+/** Prices every leg of the given stops in one batch and lays the day out. */
+export async function routePlan({ date, stops, settings, now = new Date() }, { getDriveMatrix = routesDriveMatrix } = {}) {
   const { homeBase, bufferMinutes, homeBy } = settings;
   if (stops.length === 0) return planDay({ date, stops, homeBase, bufferMinutes, homeBy, drives: [] });
 

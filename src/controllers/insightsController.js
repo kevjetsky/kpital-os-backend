@@ -1,6 +1,6 @@
 import { asyncHandler } from "../utils.js";
 import { areaPoints, businessToday, insights, related, today } from "../insights/service.js";
-import { dayStops, planDay, routePlan } from "../insights/routePlan.js";
+import { calendarStops, planDay, routePlan } from "../insights/routePlan.js";
 import { getSlotFinderSettings } from "../slotFinder/settings.js";
 import { resolveAddress } from "../services/geoService.js";
 
@@ -43,34 +43,48 @@ export const getToday = asyncHandler(async (req, res) => {
   return res.json({ ...day, homeBase });
 });
 
-// The drive-time allowance belongs to the business that owns the calendar the
-// Slot Finder reads; other accounts on this server get the plan without drives.
-function drivesAvailable(accountId) {
+// The calendar and the drive-time allowance belong to the business that owns
+// the calendar the Slot Finder reads; other accounts get an empty route.
+function isCalendarOwner(accountId) {
   const owner = String(process.env.GOOGLE_CALENDAR_ACCOUNT_ID || "").trim();
-  return Boolean(String(process.env.GOOGLE_MAPS_API_KEY || "").trim() && owner && owner === String(accountId));
+  return Boolean(owner && owner === String(accountId));
 }
+const hasMapsKey = () => Boolean(String(process.env.GOOGLE_MAPS_API_KEY || "").trim());
 
-// GET /api/entries/route-plan[?date=YYYY-MM-DD]
+// GET /api/entries/route-plan[?date=YYYY-MM-DD][&drives=0]
+// The day's visits from Google Calendar, with drive times unless drives=0 (the
+// Home card, which only needs the stops and must not spend the Routes allowance).
 export const getRoutePlan = asyncHandler(async (req, res) => {
   const param = dayParam(req, res);
   if (!param) return undefined;
   const date = param.date || businessToday();
-  const settings = await getSlotFinderSettings(req.accountId);
-  if (!drivesAvailable(req.accountId)) {
-    const stops = await dayStops(req.accountId, date);
-    return res.json({ ...planDay({ date, stops, homeBase: settings.homeBase, drives: [] }), drivesAvailable: false, warnings: [] });
-  }
+  const wantDrives = req.query.drives !== "0";
+  const [settings, home] = await Promise.all([getSlotFinderSettings(req.accountId), homeBasePoint(req.accountId)]);
+  const bare = (stops, extra) => ({
+    ...planDay({ date, stops, homeBase: settings.homeBase, drives: [] }),
+    warnings: [],
+    home,
+    drivesAvailable: false,
+    ...extra
+  });
+
+  if (!isCalendarOwner(req.accountId)) return res.json(bare([], { calendarAvailable: false, unrouted: [] }));
+
+  let found;
   try {
-    const plan = await routePlan({ accountId: req.accountId, date, settings });
-    return res.json({ ...plan, drivesAvailable: true });
+    found = await calendarStops(req.accountId, date);
   } catch (error) {
-    // Google out of reach, or today's allowance used up: the stops still come back.
-    const stops = await dayStops(req.accountId, date);
-    return res.json({
-      ...planDay({ date, stops, homeBase: settings.homeBase, drives: [] }),
-      drivesAvailable: false,
-      warnings: [error?.message || "Drive times are unavailable right now."]
-    });
+    return res.json(bare([], { calendarAvailable: false, unrouted: [], warnings: [error?.message || "Google Calendar could not be read."] }));
+  }
+  const { stops, unrouted } = found;
+  if (!wantDrives || !hasMapsKey()) return res.json(bare(stops, { calendarAvailable: true, unrouted }));
+
+  try {
+    const plan = await routePlan({ date, stops, settings });
+    return res.json({ ...plan, home, drivesAvailable: true, calendarAvailable: true, unrouted });
+  } catch (error) {
+    // Google Routes out of reach, or today's allowance used up: the stops still come back.
+    return res.json(bare(stops, { calendarAvailable: true, unrouted, warnings: [error?.message || "Drive times are unavailable right now."] }));
   }
 });
 

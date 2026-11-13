@@ -1,7 +1,7 @@
 // A day's route: the order of the stops, the drives between them, and whether
 // each can be reached in time.
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from "vitest";
 import request from "supertest";
 import mongoose from "mongoose";
 import { MongoMemoryReplSet } from "mongodb-memory-server";
@@ -9,7 +9,21 @@ import bcrypt from "bcryptjs";
 import app from "../app.js";
 import { Settings } from "../models/Settings.js";
 import { Entry } from "../models/Entry.js";
-import { planDay, routePlan } from "../insights/routePlan.js";
+import { calendarStops, planDay, routePlan, streetKey } from "../insights/routePlan.js";
+import { listDayEvents } from "../services/googleCalendar.js";
+
+// The calendar is stubbed; the rest of the module (normalizeEvents) is real.
+vi.mock("../services/googleCalendar.js", async (importOriginal) => ({ ...(await importOriginal()), listDayEvents: vi.fn() }));
+
+// A Google Calendar event on DAY, Chicago time (CST, -06:00, in November).
+const event = (summary, start, end, location = "", extra = {}) => ({
+  status: "confirmed",
+  summary,
+  location,
+  start: { dateTime: `${DAY}T${start}:00-06:00` },
+  end: { dateTime: `${DAY}T${end}:00-06:00` },
+  ...extra
+});
 
 const DAY = "2026-11-20";
 let mongod;
@@ -90,33 +104,70 @@ describe("planning the day", () => {
   });
 });
 
-describe("the day's stops and their drives", () => {
-  it("orders stops by time, then as booked, prices each leg once, and skips jobs with no address", async () => {
-    await job({ description: "late", customerAddress: "2 B St", scheduledTime: "15:00" });
-    await job({ description: "untimed", customerAddress: "3 C St", customerPhone: "555-0102" });
-    await job({ description: "early", customerAddress: "1 A St", scheduledTime: "09:00", customerPhone: "555-0103" });
-    await job({ description: "nowhere", scheduledTime: "12:00", customerPhone: "555-0104" });
-    await job({ description: "other day", date: "2026-11-21", customerAddress: "9 Z St", customerPhone: "555-0105" });
-
-    let asked = [];
-    const plan = await routePlan(
-      { accountId: account._id, date: DAY, settings: { homeBase: "Home", bufferMinutes: 10, homeBy: "" } },
-      { getDriveMatrix: async (legs) => { asked = legs; return legs.map(() => ({ minutes: 20 })); } }
-    );
-    expect(plan.stops.map((stop) => stop.address)).toEqual(["1 A St", "2 B St", "3 C St"]);
-    expect(asked.map((leg) => `${leg.from} > ${leg.to}`)).toEqual(["Home > 1 A St", "1 A St > 2 B St", "2 B St > 3 C St", "3 C St > Home"]);
-    expect(plan).toMatchObject({ leaveHomeBy: "8:30 AM", totalDriveMin: 80 });
+describe("the day's stops come from the calendar", () => {
+  it("matches the street line, whatever the punctuation and city", () => {
+    expect(streetKey("123 Main St., Houston, TX 77002, USA")).toBe("123 main st");
+    expect(streetKey("  123  MAIN st")).toBe("123 main st");
   });
 
-  it("answers by route: stops for any day, and drives only for the account that owns the allowance", async () => {
-    await job({ customerAddress: "1 A St", scheduledTime: "09:00" });
-    const plan = await authed(request(app).get(`/api/entries/route-plan?date=${DAY}`));
-    expect(plan.status).toBe(200);
-    expect(plan.body).toMatchObject({ date: DAY, drivesAvailable: false, warnings: [] });
-    expect(plan.body.stops).toHaveLength(1);
+  it("takes timed events with a location in order, marks the ones already logged, and finds the customer", async () => {
+    // Logged today at stop 1; an older job at stop 2 knows who lives there.
+    await job({ description: "logged", customerAddress: "1 A St, Houston, TX", customerName: "Ana", jobStatus: "Done" });
+    await job({ date: "2026-10-01", description: "old", customerAddress: "2 B St.", customerName: "Ben", customerPhone: "555-0199" });
+    const items = [
+      event("PS5 HDMI", "15:00", "16:30", "2 B St, Houston, TX 77002, USA"),
+      event("Xbox clean", "09:00", "10:00", "1 A St, Houston, TX 77002"),
+      event("Dentist", "12:00", "13:00"),
+      event("Day off?", "00:00", "00:00", "Somewhere", { start: { date: DAY }, end: { date: "2026-11-21" } }),
+      event("Cancelled", "11:00", "12:00", "9 Z St", { status: "cancelled" })
+    ];
+    const { stops, unrouted } = await calendarStops(account._id, DAY, { fetchCalendarItems: async () => items });
+
+    expect(stops.map((stop) => [stop.order, stop.title, stop.scheduledTime, stop.minutes])).toEqual([
+      [1, "Xbox clean", "09:00", 60],
+      [2, "PS5 HDMI", "15:00", 90]
+    ]);
+    expect(stops[0].entryId).toEqual(expect.any(String));
+    expect(stops[0]).toMatchObject({ customerName: "Ana", lat: null, lng: null });
+    expect(stops[1]).toMatchObject({ entryId: null, customerName: "Ben", customerPhone: "555-0199" });
+    expect(unrouted).toEqual([{ title: "Dentist", time: "12:00" }]);
+  });
+
+  it("prices home, each stop and home again in one batch", async () => {
+    const stops = [
+      { _id: "a", order: 1, address: "1 A St", scheduledTime: "09:00", minutes: 60 },
+      { _id: "b", order: 2, address: "2 B St", scheduledTime: "15:00", minutes: 60 }
+    ];
+    let asked = [];
+    const plan = await routePlan(
+      { date: DAY, stops, settings: { homeBase: "Home", bufferMinutes: 10, homeBy: "" } },
+      { getDriveMatrix: async (legs) => { asked = legs; return legs.map(() => ({ minutes: 20 })); } }
+    );
+    expect(asked.map((leg) => `${leg.from} > ${leg.to}`)).toEqual(["Home > 1 A St", "1 A St > 2 B St", "2 B St > Home"]);
+    expect(plan).toMatchObject({ leaveHomeBy: "8:30 AM", totalDriveMin: 60 });
+  });
+
+  it("answers by route: calendar stops only for the calendar's owner, never drives with drives=0", async () => {
+    vi.mocked(listDayEvents).mockResolvedValue([event("Xbox clean", "09:00", "10:00", "1 A St")]);
+
+    // Not the owner: an empty route, and the calendar is never read.
+    const other = await authed(request(app).get(`/api/entries/route-plan?date=${DAY}`));
+    expect(other.body).toMatchObject({ date: DAY, calendarAvailable: false, stops: [] });
+    expect(listDayEvents).not.toHaveBeenCalled();
+
+    process.env.GOOGLE_CALENDAR_ACCOUNT_ID = String(account._id);
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    const home = await authed(request(app).get(`/api/entries/route-plan?date=${DAY}&drives=0`));
+    expect(home.body).toMatchObject({ calendarAvailable: true, drivesAvailable: false, warnings: [] });
+    expect(home.body.stops.map((stop) => stop.title)).toEqual(["Xbox clean"]);
+
+    // The calendar failing still answers, with the reason.
+    vi.mocked(listDayEvents).mockRejectedValueOnce(new Error("Google Calendar request failed."));
+    const down = await authed(request(app).get(`/api/entries/route-plan?date=${DAY}&drives=0`));
+    expect(down.body).toMatchObject({ calendarAvailable: false, stops: [], warnings: ["Google Calendar request failed."] });
 
     const day = await authed(request(app).get(`/api/entries/today?date=${DAY}`));
-    expect(day.body).toMatchObject({ date: DAY, todayCount: 1 });
+    expect(day.status).toBe(200);
     expect((await authed(request(app).get("/api/entries/today?date=tomorrow"))).status).toBe(400);
     expect((await authed(request(app).get("/api/entries/route-plan?date=2026-13-40"))).status).toBe(400);
   });

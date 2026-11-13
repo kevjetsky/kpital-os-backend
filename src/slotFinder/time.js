@@ -99,6 +99,12 @@ export function formatClock(instant) {
   return clock12(p.hour, p.minute);
 }
 
+// "HH:MM", 24-hour, in Chicago time, e.g. "14:30".
+export function chicagoTime(instant) {
+  const p = chicagoParts(instant);
+  return `${pad(p.hour)}:${pad(p.minute)}`;
+}
+
 // "21:00" -> "9:00 PM".
 export function formatSlotTime(hhmm) {
   const [hour, minute] = hhmm.split(":").map(Number);
