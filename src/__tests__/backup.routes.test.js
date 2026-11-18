@@ -9,6 +9,7 @@ import jwt from "jsonwebtoken";
 import { MongoMemoryReplSet } from "mongodb-memory-server";
 import app from "../app.js";
 import { Entry } from "../models/Entry.js";
+import { Settings } from "../models/Settings.js";
 import { RecurringEntry } from "../models/RecurringEntry.js";
 import { TaxRemittance } from "../models/TaxRemittance.js";
 import { dumpDatabase, readDump, restoreDump, runBackup } from "../services/backupService.js";
@@ -50,6 +51,8 @@ beforeAll(async () => {
   mongod = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   process.env.JWT_SECRET = "test-secret-for-tests-only";
   await mongoose.connect(mongod.getUri());
+  // Tokens are only good for accounts that exist.
+  await Settings.create([accountA, accountB].map((_id, i) => ({ _id, email: `owner${i}@example.com`, passwordHash: "x" })));
 });
 
 afterAll(async () => {
@@ -182,9 +185,12 @@ describe("restoring a backup", () => {
     const { gzipped, counts } = await dumpDatabase();
     expect(readDump(gzipped).counts).toEqual(counts);
 
+    // An empty database, as after a disaster: the accounts go too, and come back.
     await mongoose.connection.collection("entries").deleteMany({});
+    await mongoose.connection.collection("settings").deleteMany({});
     const result = await restoreDump(mongoose.connection.db, gzipped);
     expect(result.restored.entries).toBe(2);
+    expect(result.restored.settings).toBe(2);
     expect(await snapshot()).toEqual(before);
     const [doc] = await mongoose.connection.collection("entries").find({}).toArray();
     expect(doc._id).toBeInstanceOf(mongoose.mongo.ObjectId);

@@ -1,6 +1,5 @@
 import crypto from "node:crypto";
 import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import { Settings } from "../models/Settings.js";
 import { sendVerificationEmail, sendPasswordResetEmail } from "../services/emailService.js";
 import {
@@ -15,6 +14,7 @@ import {
   asyncHandler
 } from "../utils.js";
 import { AUTH_COOKIE_NAME } from "../constants.js";
+import { rememberSessionEpoch, verifySession } from "../middleware/auth.js";
 
 const VERIFICATION_CODE_TTL_MS = 10 * 60 * 1000;
 
@@ -100,12 +100,8 @@ export const status = asyncHandler(async (req, res) => {
     return res.json({ requiresSetup: false, legacy: false, authenticated: false });
   }
 
-  try {
-    jwt.verify(token, process.env.JWT_SECRET);
-    return res.json({ requiresSetup: false, legacy: false, authenticated: true });
-  } catch {
-    return res.json({ requiresSetup: false, legacy: false, authenticated: false });
-  }
+  const { error } = await verifySession(token);
+  return res.json({ requiresSetup: false, legacy: false, authenticated: !error });
 });
 
 export const setup = asyncHandler(async (req, res) => {
@@ -166,7 +162,7 @@ export const login = asyncHandler(async (req, res) => {
     return res.json({ ok: true, requiresVerification: true });
   }
 
-  const token = issueAuthToken(settings._id);
+  const token = issueAuthToken(settings._id, settings.sessionEpoch);
   setAuthCookie(res, token);
   return res.json(authResponse(req, token));
 });
@@ -192,7 +188,7 @@ export const verifyEmail = asyncHandler(async (req, res) => {
   clearPendingCode(settings);
   await settings.save();
 
-  const token = issueAuthToken(settings._id);
+  const token = issueAuthToken(settings._id, settings.sessionEpoch);
   setAuthCookie(res, token);
   return res.json(authResponse(req, token));
 });
@@ -225,10 +221,13 @@ export const resetPassword = asyncHandler(async (req, res) => {
   settings.passwordHash = await bcrypt.hash(String(newPassword), 10);
   // Receiving the reset code proves ownership of the address.
   settings.emailVerified = true;
+  // A new password ends every other session (and the MCP server's token).
+  settings.sessionEpoch = (settings.sessionEpoch || 0) + 1;
   clearPendingCode(settings);
   await settings.save();
+  rememberSessionEpoch(settings._id, settings.sessionEpoch);
 
-  const token = issueAuthToken(settings._id);
+  const token = issueAuthToken(settings._id, settings.sessionEpoch);
   setAuthCookie(res, token);
   return res.json(authResponse(req, token));
 });
@@ -317,3 +316,14 @@ export const logout = (_req, res) => {
   res.clearCookie(AUTH_COOKIE_NAME, getAuthCookieOptions());
   res.json({ ok: true });
 };
+
+// POST /api/auth/logout-all: ends every session of this account, this one
+// included, along with the token the MCP server uses (it needs a new one).
+export const logoutAll = asyncHandler(async (req, res) => {
+  const account = await Settings.findByIdAndUpdate(req.accountId, { $inc: { sessionEpoch: 1 } }, { new: true })
+    .select("sessionEpoch")
+    .lean();
+  if (account) rememberSessionEpoch(req.accountId, account.sessionEpoch);
+  res.clearCookie(AUTH_COOKIE_NAME, getAuthCookieOptions());
+  return res.json({ ok: true });
+});

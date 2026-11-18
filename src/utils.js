@@ -39,10 +39,11 @@ export function toAccountObjectId(accountId) {
 
 // The token carries the account it belongs to; requireAuth turns that into
 // req.accountId, which every query scopes on. Tokens issued before tenancy have
-// no accountId and are rejected, forcing a re-login.
-export function issueAuthToken(accountId) {
+// no accountId and are rejected, forcing a re-login. `se` is the account's
+// session number, so ending sessions can invalidate it.
+export function issueAuthToken(accountId, sessionEpoch = 0) {
   if (!accountId) throw new Error("issueAuthToken requires an accountId.");
-  return jwt.sign({ role: "owner", accountId: String(accountId) }, process.env.JWT_SECRET, {
+  return jwt.sign({ role: "owner", accountId: String(accountId), se: sessionEpoch || 0 }, process.env.JWT_SECRET, {
     expiresIn: "7d"
   });
 }

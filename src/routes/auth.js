@@ -11,6 +11,7 @@ import {
   resetPasswordSchema
 } from "../schemas.js";
 import * as auth from "../controllers/authController.js";
+import { requireAuth } from "../middleware/auth.js";
 
 const router = Router();
 
@@ -23,5 +24,6 @@ router.post("/resend-code", authRateLimiter, validate(resendCodeSchema), auth.re
 router.post("/forgot-password", authRateLimiter, validate(forgotPasswordSchema), auth.forgotPassword);
 router.post("/reset-password", authRateLimiter, validate(resetPasswordSchema), auth.resetPassword);
 router.post("/logout", auth.logout);
+router.post("/logout-all", requireAuth, auth.logoutAll);
 
 export default router;

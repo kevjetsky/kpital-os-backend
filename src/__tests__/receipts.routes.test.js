@@ -7,6 +7,7 @@ import jwt from "jsonwebtoken";
 import { MongoMemoryReplSet } from "mongodb-memory-server";
 import app from "../app.js";
 import { Entry } from "../models/Entry.js";
+import { Settings } from "../models/Settings.js";
 import { sniffImage } from "../services/receiptService.js";
 
 let mongod;
@@ -43,6 +44,8 @@ beforeAll(async () => {
   mongod = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
   process.env.JWT_SECRET = "test-secret-for-tests-only";
   await mongoose.connect(mongod.getUri());
+  // Tokens are only good for accounts that exist.
+  await Settings.create([accountA, accountB].map((_id, i) => ({ _id, email: `owner${i}@example.com`, passwordHash: "x" })));
 });
 afterAll(async () => {
   await mongoose.connection.close();

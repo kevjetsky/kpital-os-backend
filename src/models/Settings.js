@@ -18,6 +18,9 @@ const settingsSchema = new mongoose.Schema(
     verificationCodeExpiresAt: { type: Date, default: null },
     verificationAttempts: { type: Number, default: 0 },
     verificationPurpose: { type: String, enum: ["", "email", "reset"], default: "" },
+    // Bumped by a password reset or "sign out everywhere": tokens issued under
+    // an older number stop working (see middleware/auth.js).
+    sessionEpoch: { type: Number, default: 0 },
     // How the business appears on invoices, receipts and statements. Kept on the
     // account so every device prints the same thing. logo is a small data URL.
     businessProfile: {

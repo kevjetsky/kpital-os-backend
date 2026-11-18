@@ -2,8 +2,8 @@ import express from "express";
 import * as receipts from "../controllers/receiptsController.js";
 import { MAX_RECEIPT_BYTES } from "../services/receiptService.js";
 import { Router } from "express";
-import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { requireAuth } from "../middleware/auth.js";
+import { accountRateLimiter } from "../middleware/rateLimiter.js";
 import * as entries from "../controllers/entriesController.js";
 import * as insights from "../controllers/insightsController.js";
 import * as sms from "../controllers/smsController.js";
@@ -12,14 +12,7 @@ const router = Router();
 
 // The route plan prices drives with paid Google Routes calls, like the Slot
 // Finder; this caps a runaway client (a refresh loop, a stuck tab).
-const routePlanLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  limit: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => String(req.accountId || ipKeyGenerator(req.ip || "unknown")),
-  message: { message: "Too many route refreshes. Wait a moment and try again." }
-});
+const routePlanLimiter = accountRateLimiter({ limit: 20, message: "Too many route refreshes. Wait a moment and try again." });
 
 router.get("/", requireAuth, entries.list);
 router.get("/summary", requireAuth, entries.summary);

@@ -1,3 +1,5 @@
+import { requireSharedSecret } from "./sharedSecret.js";
+
 // Auth for carrier webhooks (inbound STOP replies).
 //
 // These arrive from Telnyx/Twilio, not from the owner's browser, so they cannot
@@ -7,16 +9,8 @@
 //
 // The account is named in the path because one deployment serves several
 // businesses and an inbound message only tells us the phone numbers involved.
-export function requireSmsWebhookSecret(req, res, next) {
-  const expected = process.env.SMS_WEBHOOK_SECRET;
-  if (!expected) {
-    return res.status(503).json({ message: "SMS webhooks are not configured." });
-  }
-
-  const provided = req.get("x-sms-webhook-secret") || "";
-  if (provided !== expected) {
-    return res.status(401).json({ message: "Unauthorized" });
-  }
-
-  return next();
-}
+export const requireSmsWebhookSecret = requireSharedSecret({
+  envName: "SMS_WEBHOOK_SECRET",
+  header: "x-sms-webhook-secret",
+  notConfigured: "SMS webhooks are not configured."
+});

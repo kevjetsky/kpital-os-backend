@@ -19,6 +19,7 @@ import geoRouter from "./routes/geo.js";
 import businessProfileRouter from "./routes/businessProfile.js";
 import metaRouter from "./routes/meta.js";
 import slotFinderRouter from "./routes/slotFinder.js";
+import { trustAppEngineProxy } from "./middleware/clientIp.js";
 
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
 
@@ -55,17 +56,23 @@ function isAllowedOrigin(origin) {
 const app = express();
 
 app.disable("x-powered-by");
+// req.ip is the real client behind App Engine's proxy and load balancer (see clientIp.js).
+app.set("trust proxy", trustAppEngineProxy);
 // The dashboard pulls the full entry list on load; over cellular that response
 // dominates load time, and JSON of this shape gzips to a fraction of its size.
 // App Engine's Node runtime does not compress for us.
 app.use(compression());
 app.use(helmet());
-// The Slot Finder can take a customer's address in its query string, which must
-// not be written to the access log.
-morgan.token("url", (req) => {
-  const url = req.originalUrl || req.url || "";
-  return url.startsWith("/api/slot-finder") ? url.split("?")[0] : url;
-});
+// Query strings carry customer data (a pasted address, a search for a name or
+// phone, a typed street), so the access log keeps each parameter's name but
+// never its value: "/api/geo/autocomplete?q=…".
+export function loggedUrl(url) {
+  const [path, query] = String(url || "").split("?");
+  if (query === undefined) return path;
+  const names = [...new URLSearchParams(query).keys()];
+  return names.length ? `${path}?${names.map((name) => `${encodeURIComponent(name)}=…`).join("&")}` : path;
+}
+morgan.token("url", (req) => loggedUrl(req.originalUrl || req.url));
 app.use(morgan("combined"));
 app.use(
   cors({

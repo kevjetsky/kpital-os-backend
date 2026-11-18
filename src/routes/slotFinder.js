@@ -1,6 +1,6 @@
 import { Router } from "express";
-import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { requireAuth } from "../middleware/auth.js";
+import { accountRateLimiter } from "../middleware/rateLimiter.js";
 import { SlotFinderError, missingEnv } from "../slotFinder/errors.js";
 import { searchDays } from "../slotFinder/service.js";
 import { listBookedJobEvents } from "../slotFinder/bookedJobs.js";
@@ -22,12 +22,8 @@ const MAX_ADDRESS_LENGTH = 300;
 router.use(requireAuth);
 // Every search is a few paid Google Routes calls; this caps a runaway client.
 router.use(
-  rateLimit({
-    windowMs: 60 * 1000,
+  accountRateLimiter({
     limit: 30,
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req) => String(req.accountId || ipKeyGenerator(req.ip || "unknown")),
     message: { error: "Too many slot searches. Wait a moment and try again.", message: "Too many slot searches. Wait a moment and try again." }
   })
 );
