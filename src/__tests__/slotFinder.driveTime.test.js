@@ -1,7 +1,7 @@
 // Acceptance test 16: the driveTime module against a mocked fetch (the real
 // module, with Google's Routes API faked at the HTTP level).
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { clearDriveCache, durationToMinutes, getDriveMatrix, getDriveMinutes, sentDepartureTime } from "../services/driveTime.js";
+import { cacheLifetimeMs, clearDriveCache, durationToMinutes, getDriveMatrix, getDriveMinutes, sentDepartureTime } from "../services/driveTime.js";
 import { chicagoInstant } from "../slotFinder/time.js";
 
 const FRIDAY = "2026-11-06";
@@ -246,19 +246,45 @@ describe("remembering answers", () => {
   const leg = (departAt) => ({ from: HOME, to: CUSTOMER, departAt });
 
   it("asks Google once for the same drive in the same 15 minutes, then again once it is stale", async () => {
-    expect(await getDriveMatrix([leg(at("12:02"))], { now: NOW })).toEqual([{ minutes: 30 }]);
+    // A leg an hour away is live traffic.
+    const soon = (time) => leg(at(time));
+    const sevenAm = at("07:00");
+    expect(await getDriveMatrix([soon("08:02")], { now: sevenAm })).toEqual([{ minutes: 30 }]);
     minutes = () => 99;
-    expect(await getDriveMatrix([leg(at("12:10"))], { now: NOW })).toEqual([{ minutes: 30 }]);
+    expect(await getDriveMatrix([soon("08:10")], { now: sevenAm })).toEqual([{ minutes: 30 }]);
     expect(calls).toHaveLength(1);
 
     // Another quarter of an hour is another traffic estimate.
-    expect(await getDriveMatrix([leg(at("12:20"))], { now: NOW })).toEqual([{ minutes: 99 }]);
+    expect(await getDriveMatrix([soon("08:20")], { now: sevenAm })).toEqual([{ minutes: 99 }]);
     expect(calls).toHaveLength(2);
 
     // Eleven minutes on, the first answer is too old to trust.
-    const later = new Date(NOW.getTime() + 11 * 60 * 1000);
-    expect(await getDriveMatrix([leg(at("12:02"))], { now: later })).toEqual([{ minutes: 99 }]);
+    const later = new Date(sevenAm.getTime() + 11 * 60 * 1000);
+    expect(await getDriveMatrix([soon("08:02")], { now: later })).toEqual([{ minutes: 99 }]);
     expect(calls).toHaveLength(3);
+  });
+
+  it("keeps a forecast hours ahead longer, but asks again in its last hour", async () => {
+    expect(await getDriveMatrix([leg(at("12:02"))], { now: NOW })).toEqual([{ minutes: 30 }]);
+    minutes = () => 99;
+    const twoHoursOn = new Date(NOW.getTime() + 2 * 60 * 60 * 1000);
+    expect(await getDriveMatrix([leg(at("12:02"))], { now: twoHoursOn })).toEqual([{ minutes: 30 }]);
+    expect(calls).toHaveLength(1);
+    const elevenThirty = at("11:30");
+    expect(await getDriveMatrix([leg(at("12:02"))], { now: elevenThirty })).toEqual([{ minutes: 99 }]);
+    expect(cacheLifetimeMs(at("12:00"), NOW)).toBe(3 * 60 * 60 * 1000);
+    expect(cacheLifetimeMs(at("09:30"), NOW)).toBe(2.5 * 60 * 60 * 1000);
+    expect(cacheLifetimeMs(at("07:00"), NOW)).toBe(10 * 60 * 1000);
+  });
+
+  it("remembers a leg already under way by the time it set off, not the time it was sent", async () => {
+    // Sent as "now + 2 minutes" each time, which moves; the key stays 9:00.
+    const tenAm = at("10:00");
+    expect(await getDriveMatrix([leg(at("09:00"))], { now: tenAm })).toEqual([{ minutes: 30 }]);
+    minutes = () => 99;
+    const afternoon = at("14:40");
+    expect(await getDriveMatrix([leg(at("09:00"))], { now: afternoon })).toEqual([{ minutes: 30 }]);
+    expect(calls).toHaveLength(1);
   });
 
   it("does not remember a failed request", async () => {

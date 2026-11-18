@@ -11,6 +11,7 @@ import { Settings } from "../models/Settings.js";
 import { Entry } from "../models/Entry.js";
 import { calendarStops, planDay, routePlan, streetKey } from "../insights/routePlan.js";
 import { listDayEvents } from "../services/googleCalendar.js";
+import { chicagoInstant } from "../slotFinder/time.js";
 
 // The calendar is stubbed; the rest of the module (normalizeEvents) is real.
 vi.mock("../services/googleCalendar.js", async (importOriginal) => ({ ...(await importOriginal()), listDayEvents: vi.fn() }));
@@ -89,11 +90,49 @@ describe("planning the day", () => {
       homeBy: "13:00",
       drives: [{ minutes: 30 }, { minutes: 35 }, { minutes: 40 }]
     });
-    expect(plan.stops[1]).toMatchObject({ arriveAt: "11:35 AM", lateByMin: 15 });
+    // 11:00 + 35 = 11:35 for an 11:30 visit: 5 minutes late, and it starts late.
+    expect(plan.stops[1]).toMatchObject({ arriveAt: "11:35 AM", startAt: "11:35 AM", endAt: "12:35 PM", spareMin: -5, lateByMin: 5 });
     expect(plan.warnings).toEqual([
-      "Stop 2 at 11:30 AM: you would get there about 15 min late.",
-      "You would be home around 1:10 PM, after your 1:00 PM limit."
+      "Stop 2 at 11:30 AM: you would get there about 5 min late.",
+      "You would be home around 1:15 PM, after your 1:00 PM limit."
     ]);
+  });
+
+  it("carries a late start on to the stops after it", () => {
+    const plan = planDay({
+      date: DAY,
+      stops: [
+        { _id: "a", order: 1, address: "A St", scheduledTime: "10:00", minutes: 90 },
+        { _id: "b", order: 2, address: "B St", scheduledTime: "11:30", minutes: 60 },
+        { _id: "c", order: 3, address: "C St", scheduledTime: "13:00", minutes: 60 }
+      ],
+      homeBase: "Home",
+      bufferMinutes: 0,
+      drives: [{ minutes: 20 }, { minutes: 20 }, { minutes: 20 }, { minutes: 20 }]
+    });
+    // Stop 1 ends 11:30, stop 2 is reached 11:50 and ends 12:50, so stop 3 is reached 13:10.
+    expect(plan.stops.map((s) => [s.order, s.arriveAt, s.startAt, s.lateByMin])).toEqual([
+      [1, null, "10:00 AM", 0],
+      [2, "11:50 AM", "11:50 AM", 20],
+      [3, "1:10 PM", "1:10 PM", 10]
+    ]);
+    expect(plan.homeAt).toBe("2:30 PM");
+  });
+
+  it("says when to set off for each stop, and warns when the buffer is eaten into", () => {
+    const plan = planDay({
+      date: DAY,
+      stops: stops.slice(0, 2),
+      homeBase: "Home",
+      bufferMinutes: 10,
+      drives: [{ minutes: 30 }, { minutes: 25 }, { minutes: 40 }]
+    });
+    // Set off from stop 1 by 11:30 - 25 - 10 = 10:55, but it ends at 11:00: 5 minutes to spare.
+    expect(plan.stops.map((s) => [s.leaveBy, s.spareMin])).toEqual([
+      ["9:20 AM", null],
+      ["10:55 AM", 5]
+    ]);
+    expect(plan.warnings).toEqual(["Stop 2 at 11:30 AM: only 5 min to spare, under your 10-minute buffer."]);
   });
 
   it("keeps going when a drive cannot be worked out", () => {
@@ -105,15 +144,21 @@ describe("planning the day", () => {
 });
 
 describe("the day's stops come from the calendar", () => {
-  it("matches the street line, whatever the punctuation and city", () => {
+  it("matches the street line, whatever the punctuation, spelling, unit and city", () => {
     expect(streetKey("123 Main St., Houston, TX 77002, USA")).toBe("123 main st");
     expect(streetKey("  123  MAIN st")).toBe("123 main st");
+    expect(streetKey("123 Main Street Apt 4, Houston")).toBe("123 main st");
+    expect(streetKey("123 Main St #4")).toBe("123 main st");
+    expect(streetKey("9 North Bellaire Boulevard")).toBe(streetKey("9 N. Bellaire Blvd"));
+    expect(streetKey("9 N Bellaire Blvd")).not.toBe(streetKey("9 S Bellaire Blvd"));
   });
 
   it("takes timed events with a location in order, marks the ones already logged, and finds the customer", async () => {
     // Logged today at stop 1; an older job at stop 2 knows who lives there.
     await job({ description: "logged", customerAddress: "1 A St, Houston, TX", customerName: "Ana", jobStatus: "Done" });
-    await job({ date: "2026-10-01", description: "old", customerAddress: "2 B St.", customerName: "Ben", customerPhone: "555-0199" });
+    await job({ date: "2026-10-01", description: "old", customerAddress: "2 B Street", customerName: "Ben", customerPhone: "555-0199" });
+    // Same house number on another street: not Ben.
+    await job({ date: "2026-10-05", description: "other", customerAddress: "2 C St", customerName: "Cy", customerPhone: "555-0100" });
     const items = [
       event("PS5 HDMI", "15:00", "16:30", "2 B St, Houston, TX 77002, USA"),
       event("Xbox clean", "09:00", "10:00", "1 A St, Houston, TX 77002"),
@@ -133,18 +178,29 @@ describe("the day's stops come from the calendar", () => {
     expect(unrouted).toEqual([{ title: "Dentist", time: "12:00" }]);
   });
 
-  it("prices home, each stop and home again in one batch", async () => {
+  it("prices home, each stop and home again in one batch, then the first leg at the real leave time", async () => {
     const stops = [
       { _id: "a", order: 1, address: "1 A St", scheduledTime: "09:00", minutes: 60 },
       { _id: "b", order: 2, address: "2 B St", scheduledTime: "15:00", minutes: 60 }
     ];
-    let asked = [];
+    const asked = [];
+    const now = chicagoInstant(DAY, "06:00");
     const plan = await routePlan(
-      { date: DAY, stops, settings: { homeBase: "Home", bufferMinutes: 10, homeBy: "" } },
-      { getDriveMatrix: async (legs) => { asked = legs; return legs.map(() => ({ minutes: 20 })); } }
+      { date: DAY, stops, settings: { homeBase: "Home", bufferMinutes: 10, homeBy: "" }, now },
+      { getDriveMatrix: async (legs) => { asked.push(legs); return legs.map(() => ({ minutes: 20 })); } }
     );
-    expect(asked.map((leg) => `${leg.from} > ${leg.to}`)).toEqual(["Home > 1 A St", "1 A St > 2 B St", "2 B St > Home"]);
+    expect(asked[0].map((leg) => `${leg.from} > ${leg.to}`)).toEqual(["Home > 1 A St", "1 A St > 2 B St", "2 B St > Home"]);
+    // First priced leaving at 8:00; the real leave time is 9:00 - 20 - 10 = 8:30, another traffic window.
+    expect(asked[1]).toEqual([{ from: "Home", to: "1 A St", departAt: chicagoInstant(DAY, "08:30") }]);
     expect(plan).toMatchObject({ leaveHomeBy: "8:30 AM", totalDriveMin: 60 });
+
+    // Leaving within the same window as first priced: no second ask.
+    asked.length = 0;
+    await routePlan(
+      { date: DAY, stops, settings: { homeBase: "Home", bufferMinutes: 0, homeBy: "" }, now },
+      { getDriveMatrix: async (legs) => { asked.push(legs); return legs.map(() => ({ minutes: 55 })); } }
+    );
+    expect(asked).toHaveLength(1);
   });
 
   it("answers by route: calendar stops only for the calendar's owner, never drives with drives=0", async () => {
@@ -170,5 +226,17 @@ describe("the day's stops come from the calendar", () => {
     expect(day.status).toBe(200);
     expect((await authed(request(app).get("/api/entries/today?date=tomorrow"))).status).toBe(400);
     expect((await authed(request(app).get("/api/entries/route-plan?date=2026-13-40"))).status).toBe(400);
+  });
+
+  it("never prices drives for a day that is over", async () => {
+    vi.mocked(listDayEvents).mockResolvedValue([event("Xbox clean", "09:00", "10:00", "1 A St")]);
+    process.env.GOOGLE_CALENDAR_ACCOUNT_ID = String(account._id);
+    process.env.GOOGLE_MAPS_API_KEY = "test-key";
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const past = await authed(request(app).get("/api/entries/route-plan?date=2020-01-02"));
+    expect(past.body).toMatchObject({ calendarAvailable: true, drivesAvailable: false, pastDay: true });
+    expect(past.body.stops).toHaveLength(1);
+    expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("routes.googleapis.com"))).toBe(false);
+    fetchSpy.mockRestore();
   });
 });

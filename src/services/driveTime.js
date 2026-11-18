@@ -34,13 +34,23 @@ const DAILY_LIMIT_REACHED =
 
 const UNREACHABLE = Object.freeze({ unreachable: true });
 
-// Answers are remembered for a few minutes, keyed by the two addresses and the
-// 15-minute window of the departure. Looking at another day, or searching the
-// same address again while on the phone with the customer, then costs none of
-// the day's drive-time allowance. Kept in memory: it only has to outlive a
-// conversation, and a restart simply asks Google again.
-const CACHE_TTL_MS = 10 * 60 * 1000;
-const CACHE_MAX = 500;
+// Answers are remembered, keyed by the two addresses and the 15-minute window
+// the leg sets off in (the time asked for, not the time sent: a leg that has
+// already set off is sent as "now", which would otherwise make a new key every
+// few minutes). How long an answer is kept depends on how far ahead it is:
+//  - a leg more than two hours away is a forecast from typical traffic, kept
+//    for up to three hours but always asked again in its last hour;
+//  - a leg within two hours reflects live traffic, kept for ten minutes;
+//  - a leg already under way or over does not change, kept for twelve hours.
+// So re-opening the day's route, looking at another day, or searching the same
+// address again while on the phone costs none of the day's drive-time
+// allowance. Kept in memory only: it never outlives the server, and a
+// customer's address is not written anywhere.
+const LIVE_TTL_MS = 10 * 60 * 1000;
+const FORECAST_AFTER_MS = 2 * 60 * 60 * 1000;
+const FORECAST_TTL_MS = 3 * 60 * 60 * 1000;
+const PAST_TTL_MS = 12 * 60 * 60 * 1000;
+const CACHE_MAX = 2000;
 const cache = new Map();
 const cacheOn = () => process.env.DRIVE_CACHE !== "off";
 
@@ -48,24 +58,29 @@ export function clearDriveCache() {
   cache.clear();
 }
 
-function cacheKeyOf(leg) {
-  const bucket = Math.floor(new Date(leg.departureTime).getTime() / BUCKET_MS);
-  return `${leg.fromKey}\n${leg.toKey}\n${bucket}`;
+export function cacheLifetimeMs(departAt, now) {
+  const ahead = departAt.getTime() - now.getTime();
+  if (ahead <= 0) return PAST_TTL_MS;
+  if (ahead > FORECAST_AFTER_MS) return Math.min(FORECAST_TTL_MS, ahead - 60 * 60 * 1000);
+  return LIVE_TTL_MS;
 }
 
-function remembered(leg, now) {
-  const hit = cache.get(cacheKeyOf(leg));
+const cacheKeyOf = (fromKey, toKey, departAt) => `${fromKey}\n${toKey}\n${Math.floor(departAt.getTime() / BUCKET_MS)}`;
+
+function remembered(key, now) {
+  const hit = cache.get(key);
   if (!hit) return null;
-  if (now.getTime() - hit.at > CACHE_TTL_MS) {
-    cache.delete(cacheKeyOf(leg));
+  if (now.getTime() > hit.expiresAt) {
+    cache.delete(key);
     return null;
   }
   return hit.result;
 }
 
-function remember(leg, now) {
-  if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
-  cache.set(cacheKeyOf(leg), { result: leg.result, at: now.getTime() });
+function remember(key, result, departAt, now) {
+  if (cache.has(key)) cache.delete(key);
+  else if (cache.size >= CACHE_MAX) cache.delete(cache.keys().next().value);
+  cache.set(key, { result, expiresAt: now.getTime() + cacheLifetimeMs(departAt, now) });
 }
 
 export function normalizeAddress(text) {
@@ -196,45 +211,36 @@ export async function getDriveMatrix(legs, { now = new Date() } = {}) {
   if (!apiKey) throw missingEnv("GOOGLE_MAPS_API_KEY");
 
   const unique = new Map();
-  const keys = legs.map((leg) => {
+  const answers = legs.map((leg) => {
     const fromKey = normalizeAddress(leg.from);
     const toKey = normalizeAddress(leg.to);
-    const departureTime = sentDepartureTime(leg.departAt, now).toISOString();
+    // A leg with a blank end cannot be routed; it is never sent.
+    if (!fromKey || !toKey) return { result: UNREACHABLE };
+    const departAt = new Date(leg.departAt);
+    const cacheKey = cacheKeyOf(fromKey, toKey, departAt);
+    const hit = cacheOn() ? remembered(cacheKey, now) : null;
+    if (hit) return { result: hit };
+
+    const departureTime = sentDepartureTime(departAt, now).toISOString();
     const key = `${fromKey}\n${toKey}\n${departureTime}`;
     if (!unique.has(key)) {
-      unique.set(key, {
-        from: cleanAddress(leg.from),
-        to: cleanAddress(leg.to),
-        fromKey,
-        toKey,
-        departureTime,
-        // A leg with a blank end cannot be routed; it is never sent.
-        result: fromKey && toKey ? null : UNREACHABLE
-      });
+      unique.set(key, { from: cleanAddress(leg.from), to: cleanAddress(leg.to), fromKey, toKey, departureTime, result: null });
     }
-    return key;
+    return { asked: unique.get(key), cacheKey, departAt };
   });
 
-  const asked = [];
   const groups = new Map();
   for (const leg of unique.values()) {
-    if (leg.result) continue;
-    if (cacheOn()) {
-      leg.result = remembered(leg, now);
-      if (leg.result) continue;
-    }
-    asked.push(leg);
     if (!groups.has(leg.departureTime)) groups.set(leg.departureTime, []);
     groups.get(leg.departureTime).push(leg);
   }
-
   const calls = [...groups].flatMap(([departureTime, group]) => planCalls(group, departureTime));
   await Promise.all(calls.map((call) => runCall(call, apiKey)));
-  // Only what Google answered is kept; a failed request throws before this.
-  if (cacheOn()) for (const leg of asked) if (leg.result) remember(leg, now);
 
-  return keys.map((key) => {
-    const { result } = unique.get(key);
+  return answers.map((answer) => {
+    const result = answer.result ?? answer.asked.result;
+    // Only what Google answered is kept; a failed request throws before this.
+    if (answer.asked && result && cacheOn()) remember(answer.cacheKey, result, answer.departAt, now);
     return result && !result.unreachable ? { minutes: result.minutes } : { unreachable: true };
   });
 }

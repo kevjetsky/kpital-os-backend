@@ -35,6 +35,9 @@ export const PAYMENT_METHODS = ["Cash", "Card", "Zelle", "Cash App", "Chime", "P
 // Entry types that represent customer-facing work and therefore require a
 // reachable customer (phone or Instagram) on every record.
 export const CUSTOMER_REQUIRED_ENTRY_TYPES = ["Repair", "Sales"];
+// Jobs done at the customer's address: the stops on the route and the bookings
+// the Slot Finder works around.
+export const VISIT_TYPES = ["Repair", "Sales"];
 export const REFERENCE_OPTION_KINDS = ["customer", "product_service", "business"];
 // Entry types that can be marked B2B (sold to, or refunded to, a saved business).
 // Money-out types other than a refund have no buyer, so the flag is dropped on them.

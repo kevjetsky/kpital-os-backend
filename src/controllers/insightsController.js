@@ -54,11 +54,16 @@ const hasMapsKey = () => Boolean(String(process.env.GOOGLE_MAPS_API_KEY || "").t
 // GET /api/entries/route-plan[?date=YYYY-MM-DD][&drives=0]
 // The day's visits from Google Calendar, with drive times unless drives=0 (the
 // Home card, which only needs the stops and must not spend the Routes allowance).
+// A day already over gets no drive times either: Google only prices drives from
+// now on, so they would be today's traffic, not that day's, and would cost
+// allowance for nothing.
 export const getRoutePlan = asyncHandler(async (req, res) => {
   const param = dayParam(req, res);
   if (!param) return undefined;
-  const date = param.date || businessToday();
-  const wantDrives = req.query.drives !== "0";
+  const today = businessToday();
+  const date = param.date || today;
+  const pastDay = date < today;
+  const wantDrives = req.query.drives !== "0" && !pastDay;
   const [settings, home] = await Promise.all([getSlotFinderSettings(req.accountId), homeBasePoint(req.accountId)]);
   const bare = (stops, extra) => ({
     ...planDay({ date, stops, homeBase: settings.homeBase, drives: [] }),
@@ -77,7 +82,7 @@ export const getRoutePlan = asyncHandler(async (req, res) => {
     return res.json(bare([], { calendarAvailable: false, unrouted: [], warnings: [error?.message || "Google Calendar could not be read."] }));
   }
   const { stops, unrouted } = found;
-  if (!wantDrives || !hasMapsKey()) return res.json(bare(stops, { calendarAvailable: true, unrouted }));
+  if (!wantDrives || !hasMapsKey()) return res.json(bare(stops, { calendarAvailable: true, unrouted, pastDay }));
 
   try {
     const plan = await routePlan({ date, stops, settings });

@@ -55,7 +55,8 @@ async function run({
   now = NOW,
   customer = PASADENA,
   durationMinutes = 60,
-  settings = defaultSlotFinderSettings()
+  settings = defaultSlotFinderSettings(),
+  locate
 } = {}) {
   const routeCalls = [];
   const calendarCalls = [];
@@ -73,7 +74,8 @@ async function run({
           if (unreachable.includes(key)) return { unreachable: true };
           return { minutes: drives[key] ?? fallback };
         });
-      }
+      },
+      ...(locate ? { locate } : {})
     }
   );
   return { result, routeCalls, calendarCalls, starts: result.slots.map((slot) => slot.start) };
@@ -443,6 +445,57 @@ describe("the day's last job, ranking and far addresses", () => {
     expect(even.result.slots.some((slot) => slot.recommended)).toBe(false);
   });
 
+  it("recommends the slot that adds the least driving, not the one with the shortest drives", async () => {
+    // Westheimer lies on the way from Spring to Katy: a visit between those two jobs adds
+    // nothing, while one after Katy is a short hop but a detour on the way home.
+    const { result, routeCalls } = await run({
+      customer: address("westheimer"),
+      items: [timed("09:00", "10:00", { location: SPRING }), timed("15:00", "16:00", { location: KATY })],
+      drives: {
+        "spring>westheimer": 30, "westheimer>katy": 30, "spring>katy": 60,
+        "katy>westheimer": 15, "westheimer>home": 15, "katy>home": 20
+      }
+    });
+    const slot = (start) => result.slots.find((s) => s.start === start);
+    expect(slot("11:00")).toMatchObject({ driveTotalMin: 60, addedDriveMin: 0, recommended: true });
+    expect(slot("17:00")).toMatchObject({ driveTotalMin: 30, addedDriveMin: 10, recommended: false });
+    // The replaced drives ride in the same batch as the rest of round 1.
+    expect(routeCalls[1].legs).toContainEqual({ from: SPRING, to: KATY, departAt: at(FRIDAY, "10:00") });
+    expect(routeCalls[1].legs).toContainEqual({ from: KATY, to: HOME, departAt: at(FRIDAY, "16:00") });
+  });
+
+  it("does not price a drive between two bookings at the same place, nor single out a slot over a minute or two", async () => {
+    const { routeCalls } = await run({
+      customer: address("katy2"),
+      items: [timed("11:00", "12:00", { location: KATY }), timed("15:00", "16:00", { location: KATY })]
+    });
+    expect(routeCalls[1].legs.some((leg) => leg.from === KATY && leg.to === KATY)).toBe(false);
+
+    // Slots before the Katy job add 33 minutes, slots after it 30: traffic noise, not a recommendation.
+    const close = await run({
+      items: [timed("15:00", "16:00", { location: KATY })],
+      drives: { "pasadena>katy": 33, "katy>pasadena": 30 }
+    });
+    expect(close.result.slots.map((s) => s.addedDriveMin)).toEqual([33, 33, 33, 30, 30, 30]);
+    expect(close.result.slots.some((s) => s.recommended)).toBe(false);
+  });
+
+  it("names the day's booking nearest the customer, as the crow flies", async () => {
+    const POINTS = { katy: { lat: 29.7858, lng: -95.8245 }, katy2: { lat: 29.7737, lng: -95.8110 }, spring: { lat: 30.0799, lng: -95.4172 } };
+    const locate = async (where) => POINTS[PLACES[where]] ?? null;
+    const { result } = await run({
+      customer: address("katy2"),
+      items: [timed("09:00", "10:00", { location: SPRING, summary: "PS5" }), timed("15:00", "16:00", { location: KATY, summary: "Xbox" })],
+      locate
+    });
+    expect(result.nearby).toMatchObject({ time: "3:00 PM", summary: "Xbox" });
+    expect(result.nearby.miles).toBeGreaterThan(0.5);
+    expect(result.nearby.miles).toBeLessThan(2);
+
+    // No lookups (or nothing placed): no hint.
+    expect((await run({ items: [timed("15:00", "16:00", { location: KATY })] })).result.nearby).toBeNull();
+  });
+
   it("flags an address past the far-drive mark, and stays quiet inside it", async () => {
     const far = await run({ drives: { "home>pasadena": 50 } });
     expect(far.result.farAway).toEqual({ driveMinutes: 50, limitMinutes: 45 });
@@ -491,6 +544,17 @@ describe("several days", () => {
     expect(d.calendar).toHaveLength(5);
     const asked = d.routes.flat().map((leg) => chicagoDateString(leg.departAt));
     expect(new Set(asked)).toEqual(new Set([FRIDAY]));
+  });
+
+  it("points out upcoming days with a booking near the customer, without asking for drives", async () => {
+    const d = deps({ "2026-11-09": [timed("10:00", "11:00", { date: "2026-11-09", location: KATY, summary: "Xbox" })] });
+    d.locate = async (where) => (where === PASADENA ? { lat: 29.69, lng: -95.21 } : where === KATY ? { lat: 29.79, lng: -95.82 } : null);
+    const result = await search({}, d);
+    const monday = result.upcoming.find((day) => day.date === "2026-11-09");
+    expect(monday.nearby).toMatchObject({ time: "10:00 AM", summary: "Xbox" });
+    expect(monday.nearby.miles).toBeGreaterThan(30);
+    expect(result.upcoming.find((day) => day.date === "2026-11-08").nearby).toBeNull();
+    expect(d.routes.flat().every((leg) => chicagoDateString(leg.departAt) === FRIDAY)).toBe(true);
   });
 
   it("checks up to three days in full and writes one line per day with openings", async () => {

@@ -19,15 +19,50 @@
 //  7. A slot with nothing booked after it is the day's last job: the drive home
 //     is priced too, and the slot is dropped if it would end the day after the
 //     owner's "home by" time.
-//  8. The offered slot with the least driving around it is marked recommended.
+//  8. Each offered slot says how much driving it adds to the day: the drive in
+//     plus the drive on, less the drive it replaces (straight from PREV to
+//     NEXT, or home). A customer on the way between two jobs adds almost
+//     nothing. The slot that adds the least, by a clear margin, is recommended.
+//  9. `nearby`: the day's booking closest to the customer as the crow flies,
+//     from free address lookups, so a day already spent nearby stands out
+//     without spending any drive-time allowance.
 import { getDriveMatrix as routesDriveMatrix, normalizeAddress } from "../services/driveTime.js";
 import { listDayEvents, normalizeEvents } from "../services/googleCalendar.js";
+import { metresBetween, resolveAddress } from "../services/geoService.js";
 import { BAD_ADDRESS_MESSAGE, SlotFinderError } from "./errors.js";
 import { buildMessages, dayLabel, joinTimes } from "./messages.js";
 import { addDays, addMinutes, chicagoDateString, chicagoInstant, formatClock, formatSlotTime } from "./time.js";
 
 // The first-pass home leg is priced as if leaving an hour before the slot.
 const HOME_FIRST_PASS_MINUTES = 60;
+// A slot is only recommended when it saves at least this much driving over
+// another; a minute or two is traffic noise.
+const RECOMMEND_MARGIN_MINUTES = 5;
+const METRES_PER_MILE = 1609.344;
+
+// Where an address is, or null; never throws.
+async function locateAddress(address) {
+  try {
+    const place = await resolveAddress(address);
+    return Number.isFinite(place?.lat) && Number.isFinite(place?.lng) ? { lat: place.lat, lng: place.lng } : null;
+  } catch {
+    return null;
+  }
+}
+
+// The located booking nearest the customer, as the crow flies, or null.
+async function nearestBooking(customerPoint, events, locate) {
+  if (!customerPoint) return null;
+  const located = events.filter((event) => event.location);
+  const points = await Promise.all(located.map((event) => locate(event.location)));
+  let best = null;
+  located.forEach((event, index) => {
+    if (!points[index]) return;
+    const miles = metresBetween(customerPoint, points[index]) / METRES_PER_MILE;
+    if (!best || miles < best.miles) best = { miles, time: formatClock(event.start), summary: event.summary || "Booking" };
+  });
+  return best && { ...best, miles: Math.round(best.miles * 10) / 10 };
+}
 
 const overlaps = (event, start, end) => event.start < end && event.end > start;
 
@@ -63,13 +98,14 @@ function nextEvents(located, slotEnd) {
 
 export async function findSlots(
   { date, address, durationMinutes, settings, now = new Date() },
-  { fetchCalendarItems = listDayEvents, getDriveMatrix = routesDriveMatrix, fetchBookedJobs = noBookedJobs } = {}
+  { fetchCalendarItems = listDayEvents, getDriveMatrix = routesDriveMatrix, fetchBookedJobs = noBookedJobs, locate = locateAddress } = {}
 ) {
   const today = chicagoDateString(now);
   const { bufferMinutes: buffer, homeBase } = settings;
   const customer = address;
   const warnings = [];
   let farAway = null;
+  let nearby = null;
 
   const respond = (state, offered) => {
     const { messageEn, messageEs } = buildMessages({
@@ -84,6 +120,7 @@ export async function findSlots(
       state,
       slots: offered,
       farAway,
+      nearby,
       warnings,
       messageEn,
       messageEs,
@@ -102,6 +139,7 @@ export async function findSlots(
   if (candidates.length === 0) return respond("no_slots", []);
 
   const events = await dayEvents(date, fetchCalendarItems, fetchBookedJobs);
+  if (events.some((event) => event.location)) nearby = await nearestBooking(await locate(customer), events, locate);
   candidates = candidates.filter((slot) => !events.some((event) => overlaps(event, slot.at, slot.end)));
   if (candidates.length === 0) return respond("no_slots", []);
 
@@ -137,21 +175,30 @@ export async function findSlots(
   // time (above) but are never PREV or NEXT.
   const located = events.filter((event) => event.location && !unroutable.has(normalizeAddress(event.location)));
 
-  // Round 1: drive in from PREV (or home), drive out to every NEXT.
+  // Round 1: drive in from PREV (or home), drive out to every NEXT, and the
+  // drive each slot would replace (PREV straight to NEXT, or home), all in one batch.
   const legs = [];
+  const add = (leg) => legs.push(leg) - 1;
+  const samePlace = (a, b) => normalizeAddress(a) === normalizeAddress(b);
   const plans = candidates.map((slot) => {
     const prev = previousEvent(located, slot.at);
     const next = nextEvents(located, slot.end);
-    const inLeg =
-      legs.push(
-        prev
-          ? { from: prev.location, to: customer, departAt: prev.end }
-          : { from: homeBase, to: customer, departAt: addMinutes(slot.at, -HOME_FIRST_PASS_MINUTES) }
-      ) - 1;
-    const outLegs = next.map((event) => legs.push({ from: customer, to: event.location, departAt: slot.end }) - 1);
+    const inLeg = add(
+      prev
+        ? { from: prev.location, to: customer, departAt: prev.end }
+        : { from: homeBase, to: customer, departAt: addMinutes(slot.at, -HOME_FIRST_PASS_MINUTES) }
+    );
+    const outLegs = next.map((event) => add({ from: customer, to: event.location, departAt: slot.end }));
     // Nothing located after it: this would be the last job, so price the way home.
-    const homeLeg = next.length === 0 ? legs.push({ from: customer, to: homeBase, departAt: slot.end }) - 1 : null;
-    return { ...slot, prev, next, inLeg, outLegs, homeLeg, unreachable: false };
+    const homeLeg = next.length === 0 ? add({ from: customer, to: homeBase, departAt: slot.end }) : null;
+    // What the day drives without this slot; the same place at both ends is no drive at all.
+    const from = prev ? prev.location : homeBase;
+    const directLegs = (next.length ? next.map((event) => event.location) : [homeBase]).map((to, i) =>
+      samePlace(from, to)
+        ? null
+        : add({ from, to, departAt: prev ? prev.end : addMinutes(next[i]?.start ?? slot.at, -HOME_FIRST_PASS_MINUTES) })
+    );
+    return { ...slot, prev, next, inLeg, outLegs, homeLeg, directLegs, unreachable: false };
   });
   const round1 = await getDriveMatrix(legs, { now });
 
@@ -163,12 +210,14 @@ export async function findSlots(
       continue;
     }
     plan.driveIn = round1[plan.inLeg].minutes;
-    const outMinutes = plan.outLegs.map((index) => round1[index].minutes);
-    plan.driveOut = outMinutes.length ? Math.max(...outMinutes) : null;
+    plan.outMinutes = plan.outLegs.map((index) => round1[index].minutes);
+    plan.driveOut = plan.outMinutes.length ? Math.max(...plan.outMinutes) : null;
     plan.driveHome = plan.homeLeg !== null ? round1[plan.homeLeg].minutes : null;
     plan.homeAt = plan.driveHome !== null ? addMinutes(plan.end, plan.driveHome) : null;
+    // A replaced drive Google could not price leaves the added driving unknown.
+    plan.direct = plan.directLegs.map((index) => (index === null ? 0 : round1[index].unreachable ? null : round1[index].minutes));
     plan.outFits = plan.next.every(
-      (event, i) => addMinutes(plan.end, outMinutes[i] + buffer) <= event.start
+      (event, i) => addMinutes(plan.end, plan.outMinutes[i] + buffer) <= event.start
     );
     plan.inFits = plan.prev ? addMinutes(plan.prev.end, plan.driveIn + buffer) <= plan.at : true;
   }
@@ -219,21 +268,34 @@ export async function findSlots(
       leaveHomeBy: plan.prev ? null : formatClock(plan.leaveHomeBy),
       driveHomeMin: plan.driveHome,
       homeAt: plan.homeAt ? formatClock(plan.homeAt) : null,
-      // All the driving this slot adds around it: in, then on to the next job or home.
+      // All the driving around this slot: in, then on to the next job or home.
       driveTotalMin: plan.driveIn + (plan.driveOut ?? plan.driveHome ?? 0),
+      addedDriveMin: addedDrive(plan),
       recommended: false
     });
   }
 
-  // With a choice to make, point at the slot that costs the least driving.
+  // With a choice to make, point at the slot that adds the least driving to the
+  // day (the drive around it when that cannot be worked out for every slot).
   if (offered.length > 1) {
-    const least = Math.min(...offered.map((slot) => slot.driveTotalMin));
-    if (offered.some((slot) => slot.driveTotalMin > least)) {
-      offered.find((slot) => slot.driveTotalMin === least).recommended = true;
+    const measure = offered.every((slot) => slot.addedDriveMin !== null) ? "addedDriveMin" : "driveTotalMin";
+    const least = Math.min(...offered.map((slot) => slot[measure]));
+    if (offered.some((slot) => slot[measure] >= least + RECOMMEND_MARGIN_MINUTES)) {
+      offered.find((slot) => slot[measure] === least).recommended = true;
     }
   }
 
   return respond(offered.length > 0 ? "ok" : "no_slots", offered);
+}
+
+// The driving a slot adds to the day: in from PREV and on to NEXT (or home),
+// less the drive from PREV to NEXT it replaces. With two NEXT events at once,
+// the larger. Null when a replaced drive could not be priced. Never below zero:
+// traffic can make a detour look a minute shorter than the direct drive.
+function addedDrive(plan) {
+  const onward = plan.next.length ? plan.outMinutes : [plan.driveHome];
+  if (plan.direct.some((minutes) => minutes === null)) return null;
+  return Math.max(0, ...onward.map((out, i) => plan.driveIn + out - plan.direct[i]));
 }
 
 // "Home by" times after midnight (before 5 AM) belong to the following morning.
@@ -258,7 +320,7 @@ export async function searchDays(
   { date, days = 1, address, durationMinutes, settings, now = new Date() },
   deps = {}
 ) {
-  const { fetchCalendarItems = listDayEvents, fetchBookedJobs = noBookedJobs } = deps;
+  const { fetchCalendarItems = listDayEvents, fetchBookedJobs = noBookedJobs, locate = locateAddress } = deps;
   const today = chicagoDateString(now);
   const count = Math.min(Math.max(1, days), MAX_SEARCH_DAYS);
 
@@ -269,6 +331,7 @@ export async function searchDays(
 
   // A past date gets its plain answer and nothing else is looked up.
   const firstUpcoming = addDays(date, count);
+  const customerPoint = firstUpcoming <= today ? null : await locate(address);
   const upcoming = firstUpcoming <= today ? [] : await Promise.all(
     Array.from({ length: UPCOMING_DAYS }, (_, index) => addDays(firstUpcoming, index)).map(async (day) => {
       const events = await dayEvents(day, fetchCalendarItems, fetchBookedJobs);
@@ -276,7 +339,8 @@ export async function searchDays(
         const at = chicagoInstant(day, start);
         return at > now && !events.some((event) => overlaps(event, at, addMinutes(at, durationMinutes)));
       });
-      return { date: day, dayLabel: dayLabel(day, today, "en"), freeSlots: free.length, starts: free };
+      const nearby = free.length ? await nearestBooking(customerPoint, events, locate) : null;
+      return { date: day, dayLabel: dayLabel(day, today, "en"), freeSlots: free.length, starts: free, nearby };
     })
   );
 
@@ -292,8 +356,8 @@ export async function searchDays(
 
   return {
     ...results[0],
-    days: results.map(({ date: day, dayLabel: label, state, slots, farAway, warnings, messageEn, messageEs }) => ({
-      date: day, dayLabel: label, state, slots, farAway, warnings, messageEn, messageEs
+    days: results.map(({ date: day, dayLabel: label, state, slots, farAway, nearby, warnings, messageEn, messageEs }) => ({
+      date: day, dayLabel: label, state, slots, farAway, nearby, warnings, messageEn, messageEs
     })),
     // One line per day with openings, for a reply that covers them all.
     summaryEn: lines("en") || null,

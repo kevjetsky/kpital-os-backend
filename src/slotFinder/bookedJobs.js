@@ -6,6 +6,7 @@
 // simply appears twice at the same time and place, which changes nothing.
 import { Entry } from "../models/Entry.js";
 import { addMinutes, chicagoInstant } from "./time.js";
+import { VISIT_TYPES } from "../constants.js";
 
 const DEFAULT_JOB_MINUTES = 60;
 // Work already finished no longer needs its place in the day.
@@ -15,7 +16,7 @@ export async function listBookedJobEvents(accountId, date) {
   const jobs = await Entry.find({
     accountId,
     date: new Date(`${date}T00:00:00.000Z`),
-    type: { $in: ["Repair", "Sales"] },
+    type: { $in: VISIT_TYPES },
     scheduledTime: { $gt: "" },
     jobStatus: { $in: OPEN_JOB_STATUSES }
   })
