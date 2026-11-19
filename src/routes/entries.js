@@ -4,6 +4,7 @@ import { MAX_RECEIPT_BYTES } from "../services/receiptService.js";
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
 import { accountRateLimiter } from "../middleware/rateLimiter.js";
+import { queryFromBody } from "../middleware/queryFromBody.js";
 import * as entries from "../controllers/entriesController.js";
 import * as insights from "../controllers/insightsController.js";
 import * as sms from "../controllers/smsController.js";
@@ -15,6 +16,11 @@ const router = Router();
 const routePlanLimiter = accountRateLimiter({ limit: 20, message: "Too many route refreshes. Wait a moment and try again." });
 
 router.get("/", requireAuth, entries.list);
+// The same searches with the values in the body, so customer details stay
+// out of URLs and Google's request log (see queryFromBody.js).
+router.post("/query", requireAuth, queryFromBody, entries.list);
+router.post("/warranty-candidates", requireAuth, queryFromBody, entries.warrantyCandidates);
+router.post("/refund-candidates", requireAuth, queryFromBody, entries.refundCandidates);
 router.get("/summary", requireAuth, entries.summary);
 router.get("/warranty-candidates", requireAuth, entries.warrantyCandidates);
 router.get("/refund-candidates", requireAuth, entries.refundCandidates);

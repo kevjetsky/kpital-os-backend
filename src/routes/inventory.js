@@ -1,10 +1,13 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
+import { queryFromBody } from "../middleware/queryFromBody.js";
 import * as inventory from "../controllers/inventoryController.js";
 
 const router = Router();
 
 router.get("/", requireAuth, inventory.listItems);
+// The same search with the typed text in the body (see queryFromBody.js).
+router.post("/query", requireAuth, queryFromBody, inventory.listItems);
 router.post("/", requireAuth, inventory.createItem);
 router.get("/reorder", requireAuth, inventory.reorderList);
 router.get("/:id", requireAuth, inventory.getItem);

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { requireAuth } from "../middleware/auth.js";
 import { accountRateLimiter } from "../middleware/rateLimiter.js";
+import { queryFromBody } from "../middleware/queryFromBody.js";
 import { asyncHandler } from "../utils.js";
 import { autocomplete, geoConfig, resolveAddress } from "../services/geoService.js";
 
@@ -18,22 +19,24 @@ router.get("/config", (_req, res) => {
   res.json({ center: { lat, lng: lon }, defaultCity });
 });
 
+// Both lookups also answer a POST with the text in the body ({ q } or
+// { address }), which is what the app sends: an address in a URL ends up in
+// Google's request log (see queryFromBody.js).
+
 // GET /api/geo/autocomplete?q= — streets that what has been typed could be. Slow
 // and best-effort; the form asks /resolve alongside and shows that first.
-router.get(
-  "/autocomplete",
-  asyncHandler(async (req, res) => {
-    res.json({ suggestions: await autocomplete(req.query.q) });
-  })
-);
+const suggest = asyncHandler(async (req, res) => {
+  res.json({ suggestions: await autocomplete(req.query.q) });
+});
+router.get("/autocomplete", suggest);
+router.post("/autocomplete", queryFromBody, suggest);
 
 // GET /api/geo/resolve?address= — the exact ZIP code and coordinates of a full
 // address. `match` is null when it cannot be placed.
-router.get(
-  "/resolve",
-  asyncHandler(async (req, res) => {
-    res.json({ match: await resolveAddress(req.query.address) });
-  })
-);
+const resolve = asyncHandler(async (req, res) => {
+  res.json({ match: await resolveAddress(req.query.address) });
+});
+router.get("/resolve", resolve);
+router.post("/resolve", queryFromBody, resolve);
 
 export default router;

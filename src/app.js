@@ -63,9 +63,10 @@ app.set("trust proxy", trustAppEngineProxy);
 // App Engine's Node runtime does not compress for us.
 app.use(compression());
 app.use(helmet());
-// Query strings carry customer data (a pasted address, a search for a name or
-// phone, a typed street), so the access log keeps each parameter's name but
-// never its value: "/api/geo/autocomplete?q=…".
+// The app and the MCP server send customer details in request bodies (see
+// queryFromBody.js), but an older client may still put them in a query string,
+// so the access log keeps each parameter's name and never its value:
+// "/api/geo/autocomplete?q=…".
 export function loggedUrl(url) {
   const [path, query] = String(url || "").split("?");
   if (query === undefined) return path;
