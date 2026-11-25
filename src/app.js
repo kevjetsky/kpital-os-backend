@@ -19,6 +19,8 @@ import geoRouter from "./routes/geo.js";
 import businessProfileRouter from "./routes/businessProfile.js";
 import metaRouter from "./routes/meta.js";
 import slotFinderRouter from "./routes/slotFinder.js";
+import bookingsRouter from "./routes/bookings.js";
+import publicBookingRouter from "./booking/routes.js";
 import { trustAppEngineProxy } from "./middleware/clientIp.js";
 
 const DEFAULT_ALLOWED_ORIGINS = ["http://localhost:3000"];
@@ -75,6 +77,9 @@ export function loggedUrl(url) {
 }
 morgan.token("url", (req) => loggedUrl(req.originalUrl || req.url));
 app.use(morgan("combined"));
+// The We-Fix-Consoles booking page calls this from its own origin, so it has
+// its own CORS (website origins, no cookies) and comes before the app's.
+app.use("/api/public/booking", publicBookingRouter);
 app.use(
   cors({
     origin(origin, callback) {
@@ -114,6 +119,7 @@ app.use("/api/sms", smsRouter);
 app.use("/api/geo", geoRouter);
 app.use("/api/business-profile", businessProfileRouter);
 app.use("/api/slot-finder", slotFinderRouter);
+app.use("/api/bookings", bookingsRouter);
 
 if (process.env.SENTRY_DSN) {
   const Sentry = await import("@sentry/node");

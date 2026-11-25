@@ -1,9 +1,11 @@
-// Read-only access to the owner's Google Calendar, the single source of truth
-// for bookings. Plain fetch, no Google client library. Never writes.
+// Access to the owner's Google Calendar, the single source of truth for
+// bookings. Plain fetch, no Google client library. The Slot Finder only reads;
+// online booking (src/booking) also adds and removes its own events.
 //
-// Auth: a refresh token (scope calendar.readonly) is exchanged for an access
-// token, which is kept in module scope until shortly before it expires. The
-// refresh token stays in the environment and is never returned or logged.
+// Auth: a refresh token is exchanged for an access token, which is kept in
+// module scope until shortly before it expires. Reading needs the
+// calendar.readonly scope; insertEvent/deleteEvent need calendar.events too.
+// The refresh token stays in the environment and is never returned or logged.
 import { SlotFinderError, missingEnv } from "../slotFinder/errors.js";
 import { addDays, chicagoInstant, isValidDateString, toChicagoRfc3339 } from "../slotFinder/time.js";
 
@@ -158,4 +160,37 @@ export function normalizeEvents(items) {
     });
   }
   return events.sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+const calendarIdOf = (calendarId) => String(calendarId || process.env.GOOGLE_CALENDAR_ID || "").trim() || "primary";
+
+// Adds an event (online booking). Returns { id, htmlLink }. Needs calendar.events.
+export async function insertEvent(event, { calendarId } = {}) {
+  const accessToken = await getAccessToken();
+  const response = await fetchWithTimeout(`${CALENDAR_URL}/${encodeURIComponent(calendarIdOf(calendarId))}/events`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify(event)
+  });
+  if (response.status === 401) tokenCache = null;
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data?.id) {
+    const reason = data?.error?.status || data?.error?.message || `HTTP ${response.status}`;
+    throw new SlotFinderError(`Google Calendar could not add the event (${String(reason).slice(0, 120)}).`, 502);
+  }
+  return { id: data.id, htmlLink: data.htmlLink || "" };
+}
+
+// Removes an event; one that is already gone counts as removed.
+export async function deleteEvent(eventId, { calendarId } = {}) {
+  const accessToken = await getAccessToken();
+  const response = await fetchWithTimeout(
+    `${CALENDAR_URL}/${encodeURIComponent(calendarIdOf(calendarId))}/events/${encodeURIComponent(eventId)}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (response.status === 401) tokenCache = null;
+  if (!response.ok && response.status !== 404 && response.status !== 410) {
+    throw new SlotFinderError("Google Calendar could not remove the event.", 502);
+  }
+  return true;
 }
