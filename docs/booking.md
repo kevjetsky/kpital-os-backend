@@ -27,7 +27,9 @@ here from a separate Cloudflare Worker (kpital-os-mcp, branch
   index, so two customers cannot take one time on any instance. A hold lasts 10
   minutes; a booked time is locked for 5 minutes, after which the calendar
   event decides.
-- **A booking** becomes a Google Calendar event on the owner's calendar (title
+- **A booking** is written calendar first, then the record; if the record
+  cannot be saved, the event is removed again so no hidden booking blocks the
+  time. It becomes a Google Calendar event on the owner's calendar (title
   "Service - Name", the address as location, blueberry, a 60-minute reminder,
   phone/device/service/notes/booking ID in the description) and a `bookings`
   record. The owner gets a push notification on their Kpital OS devices and an
@@ -43,9 +45,10 @@ Public, for the website (`src/booking/routes.js`, mounted at
 | `GET /status` | enabled flag and which parts are live |
 | `POST /suggest` `{ q }` | address suggestions as the customer types |
 | `POST /check-area` `{ address, turnstileToken }` | in the service area? returns a 30-minute `areaToken` |
-| `GET /days?areaToken=` | days with a window that fits, and how many |
+| `GET /days?areaToken=[&holdId=]` | days with a window that fits, and how many (the customer's own hold counts as open) |
 | `GET /slots?areaToken=&date=[&holdId=]` | a day's windows |
 | `POST /hold` `{ areaToken, start, replaceHoldId? }` | hold a window for 10 minutes |
+| `POST /release` `{ areaToken, holdId }` | let go of the customer's own hold (same address only) |
 | `POST /book` (header `Idempotency-Key`) | book a held window |
 
 Owner, signed in (`src/routes/bookings.js`): `GET /api/bookings` and
@@ -78,7 +81,7 @@ events (the Slot Finder alone only needs `calendar.readonly`).
 | `BOOKING_CALENDAR_ID` | `GOOGLE_CALENDAR_ID` or primary | where events go |
 | `BOOKING_EMAIL_SUBJECT_PREFIX` | empty | e.g. `[BETA] ` |
 | `BOOKING_EMAIL_FROM` | none | customer confirmation sender; customer email is only sent when set |
-| `BOOKING_RATE_*` | 10/h check-area, 150/h suggest, 30/h days+slots, 10/h hold, 3/day book | per client address |
+| `BOOKING_RATE_*` | 10/h check-area, 150/h suggest, 30/h days+slots+release, 10/h hold, 3/day book | per client address; a book attempt counts only with valid details and a live hold (replays and typos do not) |
 
 Email: the owner email uses `RESEND_FROM_EMAIL`. While that is Resend's
 sandbox sender (`onboarding@resend.dev`), Resend only delivers to the email

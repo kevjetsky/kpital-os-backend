@@ -7,6 +7,7 @@
 //   GET  /days         the days with a window that fits this address
 //   GET  /slots        a day's windows
 //   POST /hold         hold a window for 10 minutes
+//   POST /release      let go of the customer's own hold
 //   POST /book         book a held window (Idempotency-Key header)
 //
 // Errors answer { error: "<code>" } with the codes the booking page knows.
@@ -15,7 +16,7 @@
 import express, { Router } from "express";
 import { randomInt } from "node:crypto";
 import { autocomplete, resolveAddress } from "../services/geoService.js";
-import { insertEvent } from "../services/googleCalendar.js";
+import { deleteEvent, insertEvent } from "../services/googleCalendar.js";
 import { isPushConfigured } from "../services/notificationService.js";
 import { SlotFinderError } from "../slotFinder/errors.js";
 import { getSlotFinderSettings } from "../slotFinder/settings.js";
@@ -36,7 +37,8 @@ import {
   getHold,
   markBooked,
   placeHold,
-  releaseHold
+  releaseHold,
+  releaseOwnHold
 } from "./store.js";
 
 const router = Router();
@@ -174,7 +176,8 @@ async function offered(ctx, area, dates, { exceptHoldId = null } = {}) {
     config: ctx.config,
     now: ctx.now,
     drive: ctx.drive,
-    exceptHoldId
+    exceptHoldId,
+    addressKey: area.k
   });
 }
 
@@ -305,7 +308,9 @@ router.get(
     const ctx = await context(req);
     await rateLimit(ctx, "slots");
     const area = requireArea(ctx, req.query.areaToken);
-    const byDate = await offered(ctx, area, windowDates(ctx));
+    // The customer's own hold still counts as open for them.
+    const holdId = typeof req.query.holdId === "string" ? req.query.holdId : null;
+    const byDate = await offered(ctx, area, windowDates(ctx), { exceptHoldId: holdId });
     res.json([...byDate].filter(([, slots]) => slots.length > 0).map(([date, slots]) => ({ date, free: slots.length })));
   })
 );
@@ -332,7 +337,7 @@ router.post(
     const area = requireArea(ctx, body.areaToken);
     const { at, date, hhmm } = parseStart(ctx, body.start);
     const accountId = ctx.config.ownerAccountId;
-    if (typeof body.replaceHoldId === "string" && body.replaceHoldId) await releaseHold(accountId, body.replaceHoldId);
+    if (typeof body.replaceHoldId === "string" && body.replaceHoldId) await releaseOwnHold(accountId, body.replaceHoldId, area.k);
 
     const fits = ((await offered(ctx, area, [date])).get(date) || []).some((slot) => slot.start === hhmm);
     if (!fits) {
@@ -356,6 +361,20 @@ router.post(
       throw new HttpError(409, "slot_taken", { slots: await freshSlots(ctx, area, date) });
     }
     res.json({ holdId: held.holdId, start: toChicagoRfc3339(at), expiresAt: held.expiresAt.toISOString() });
+  })
+);
+
+// The customer changed their address or left: free their held time for others
+// now instead of in 10 minutes. Only their own plain hold (same address).
+router.post(
+  "/release",
+  route(async (req, res) => {
+    const ctx = await context(req);
+    await rateLimit(ctx, "slots");
+    const body = req.body || {};
+    const area = requireArea(ctx, body.areaToken);
+    const released = await releaseOwnHold(ctx.config.ownerAccountId, body.holdId, area.k);
+    res.json({ released });
   })
 );
 
@@ -403,7 +422,6 @@ router.post(
   "/book",
   route(async (req, res) => {
     const ctx = await context(req);
-    await rateLimit(ctx, "book");
     const idempotencyKey = String(req.get("Idempotency-Key") || "");
     if (!/^[\w-]{8,100}$/.test(idempotencyKey)) throw new HttpError(400, "idempotency_key_required");
     const body = req.body || {};
@@ -422,6 +440,9 @@ router.post(
       const details = validateBooking(body);
       const hold = await getHold(accountId, body.holdId, ctx.now);
       if (!hold) throw new HttpError(409, "hold_expired");
+      // Counted here, so a replay, a typo or a hold that ran out does not use up
+      // one of the day's bookings for this client address.
+      await rateLimit(ctx, "book");
       const area = { a: hold.area.address, p: { lat: hold.area.lat, lng: hold.area.lng }, k: hold.area.key };
       const { date } = hold;
       const hhmm = chicagoTime(new Date(hold.start));
@@ -473,21 +494,31 @@ router.post(
         { calendarId: ctx.config.calendarId }
       );
 
-      const booking = await Booking.create({
-        accountId,
-        bookingId,
-        date,
-        start,
-        end,
-        ...details,
-        address: area.a,
-        addressKey: area.k,
-        lat: area.p.lat,
-        lng: area.p.lng,
-        calendarId: ctx.config.calendarId,
-        eventId: event.id,
-        calendarLink: event.htmlLink
-      });
+      let booking;
+      try {
+        booking = await Booking.create({
+          accountId,
+          bookingId,
+          date,
+          start,
+          end,
+          ...details,
+          address: area.a,
+          addressKey: area.k,
+          lat: area.p.lat,
+          lng: area.p.lng,
+          calendarId: ctx.config.calendarId,
+          eventId: event.id,
+          calendarLink: event.htmlLink
+        });
+      } catch (error) {
+        // No record, no event: take the calendar event back off so the time
+        // is not blocked by a booking nobody can see.
+        await deleteEvent(event.id, { calendarId: ctx.config.calendarId }).catch((undo) =>
+          log("booking_event_orphaned", { bookingId, eventId: event.id, error: String(undo?.message || undo) })
+        );
+        throw error;
+      }
       await markBooked(accountId, claimedHoldId, bookingId, ctx.now);
       claimedHoldId = null;
 

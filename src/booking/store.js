@@ -12,15 +12,13 @@ const STALE_REQUEST_MS = 2 * 60 * 1000;
 
 const isDuplicate = (error) => error?.code === 11000;
 
-// Active locks on these dates, as { holds, bookings } of { start, end, area }.
-export async function activeLocks(accountId, dates, now, { exceptHoldId = null } = {}) {
+// Active locks on these dates. The customer's own hold (`exceptHoldId`, for the
+// same address) is left out, so they still see the time they are holding.
+export async function activeLocks(accountId, dates, now, { exceptHoldId = null, addressKey = null } = {}) {
   const locks = await BookingLock.find({ accountId, date: { $in: dates }, expiresAt: { $gt: now } }).lean();
-  const out = [];
-  for (const lock of locks) {
-    if (exceptHoldId && String(lock._id) === String(exceptHoldId)) continue;
-    out.push(lock);
-  }
-  return out;
+  return locks.filter(
+    (lock) => !(exceptHoldId && String(lock._id) === String(exceptHoldId) && (!addressKey || lock.area?.key === addressKey))
+  );
 }
 
 // Takes the time for a customer, or { ok: false } when someone else has it.
@@ -50,6 +48,14 @@ const validId = (id) => typeof id === "string" && /^[a-f0-9]{24}$/.test(id);
 export async function releaseHold(accountId, holdId) {
   if (!validId(holdId)) return;
   await BookingLock.deleteOne({ accountId, _id: holdId, kind: { $in: ["hold", "claimed"] } });
+}
+
+// A customer letting go of their own hold (a new time, a new address): only a
+// plain hold, and only for the address that placed it. Never a booking in progress.
+export async function releaseOwnHold(accountId, holdId, addressKey) {
+  if (!validId(holdId) || !addressKey) return false;
+  const { deletedCount } = await BookingLock.deleteOne({ accountId, _id: holdId, kind: "hold", "area.key": addressKey });
+  return deletedCount > 0;
 }
 
 export async function getHold(accountId, holdId, now) {

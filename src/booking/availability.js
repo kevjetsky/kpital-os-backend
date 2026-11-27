@@ -47,8 +47,8 @@ function lockEvents(locks, date) {
  * `address`, checking the dates one after another so drive times repeat from
  * the cache.
  */
-export async function offeredByDate({ dates, address, accountId, settings, config, now, drive, exceptHoldId = null }) {
-  const locks = await activeLocks(accountId, dates, now, { exceptHoldId });
+export async function offeredByDate({ dates, address, accountId, settings, config, now, drive, exceptHoldId = null, addressKey = null }) {
+  const locks = await activeLocks(accountId, dates, now, { exceptHoldId, addressKey });
   const homeBy = bookingHomeBy(settings, config);
   const earliest = addMinutes(now, config.minLeadMinutes);
   const out = new Map();

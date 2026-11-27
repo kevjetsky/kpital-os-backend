@@ -279,6 +279,45 @@ describe("the booking flow", () => {
     expect(own.body.some((s) => s.start === hold.start)).toBe(true);
   });
 
+  it("the customer's own hold stays open for them in /days; /release and replaceHoldId only free their own hold", async () => {
+    const { hold, areaToken, day } = await holdFirstSlot(MAIN);
+    const free = async (token, holdId = "") =>
+      (await call("get", `/days?areaToken=${encodeURIComponent(token)}${holdId ? `&holdId=${holdId}` : ""}`, { ip: freshIp() })).body.find(
+        (d) => d.date === day.date
+      )?.free ?? 0;
+    const withOwn = await free(areaToken, hold.holdId);
+    expect(await free(areaToken)).toBe(withOwn - 1);
+
+    // Another address cannot see through it, release it or replace it.
+    const other = await checkArea(ELM);
+    expect(await free(other.areaToken, hold.holdId)).toBe(await free(other.areaToken));
+    const stranger = await call("post", "/release", { body: { areaToken: other.areaToken, holdId: hold.holdId }, ip: freshIp() });
+    expect(stranger.body).toEqual({ released: false });
+    const elmSlots = (await call("get", `/slots?areaToken=${encodeURIComponent(other.areaToken)}&date=${day.date}`, { ip: freshIp() })).body;
+    const swap = await call("post", "/hold", { body: { areaToken: other.areaToken, start: elmSlots[0].start, replaceHoldId: hold.holdId }, ip: freshIp() });
+    expect(swap.status, JSON.stringify(swap.body)).toBe(200);
+    expect(await BookingLock.countDocuments({ accountId, _id: hold.holdId })).toBe(1);
+    const elmRelease = await call("post", "/release", { body: { areaToken: other.areaToken, holdId: swap.body.holdId }, ip: freshIp() });
+    expect(elmRelease.body).toEqual({ released: true });
+
+    // The customer lets go: the time is free again right away.
+    const mine = await call("post", "/release", { body: { areaToken, holdId: hold.holdId }, ip: freshIp() });
+    expect(mine.body).toEqual({ released: true });
+    expect(await BookingLock.countDocuments({ accountId, _id: hold.holdId })).toBe(0);
+    expect(await free(areaToken)).toBe(withOwn);
+  });
+
+  it("if the booking record cannot be saved, its calendar event is taken back off and the time is freed", async () => {
+    const { hold } = await holdFirstSlot();
+    vi.spyOn(Booking, "create").mockRejectedValueOnce(new Error("write failed"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await book(hold.holdId, "orphan-key-1");
+    expect(res.status).toBe(500);
+    expect(google.inserted).toHaveLength(1);
+    expect(google.deleted).toEqual([google.inserted[0].id]);
+    expect(await BookingLock.countDocuments({ accountId, _id: hold.holdId })).toBe(0);
+  });
+
   it("an expired hold cannot be booked", async () => {
     const { hold } = await holdFirstSlot();
     vi.setSystemTime(new Date(NOW.getTime() + 11 * 60000));
@@ -407,6 +446,25 @@ describe("guards", () => {
     expect(blocked.status).toBe(429);
     expect(Number(blocked.headers["retry-after"])).toBeGreaterThan(0);
     expect((await call("post", "/check-area", { body: { address: MAIN }, ip: "192.0.2.2" })).status).toBe(200);
+  });
+
+  it("rate limit: 3 bookings a day from one address; replays and refused attempts do not count", async () => {
+    const ip = "192.0.2.50";
+    const first = await holdFirstSlot(MAIN);
+    expect((await book(first.hold.holdId, "rl-book-1", { phone: "3465550101" }, ip)).status).toBe(200);
+    expect((await book(first.hold.holdId, "rl-book-1", { phone: "3465550101" }, ip)).headers["idempotent-replay"]).toBe("true");
+    expect((await book("0".repeat(24), "rl-book-2", {}, ip)).body.error).toBe("hold_expired");
+    expect((await book(first.hold.holdId, "rl-book-3", { phone: "123" }, ip)).body.error).toBe("invalid_phone");
+    const second = await holdFirstSlot(ELM);
+    expect((await book(second.hold.holdId, "rl-book-4", { phone: "3465550102" }, ip)).status).toBe(200);
+    const third = await holdFirstSlot(HOME);
+    expect((await book(third.hold.holdId, "rl-book-5", { phone: "3465550103" }, ip)).status).toBe(200);
+    const fourth = await holdFirstSlot(MAIN);
+    const blocked = await book(fourth.hold.holdId, "rl-book-6", { phone: "3465550104" }, ip);
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error).toBe("rate_limited");
+    // Refused, so the hold is untouched and the key can be used again later.
+    expect(await BookingLock.countDocuments({ accountId, _id: fourth.hold.holdId, kind: "hold" })).toBe(1);
   });
 
   it("Turnstile is checked when its secret is set", async () => {

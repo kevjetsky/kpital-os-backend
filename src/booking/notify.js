@@ -135,14 +135,22 @@ async function sendResend(payload) {
     headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
-  if (!response.ok) throw new Error(`Resend answered ${response.status}`);
+  if (!response.ok) throw Object.assign(new Error(`Resend answered ${response.status}`), { status: response.status });
   return true;
 }
+
+// A refusal (4xx, e.g. Resend's test sender writing to another address) is not
+// retried; it would only be refused again. Network errors, 429 and 5xx are.
+const retryable = (error) => !(error?.status >= 400 && error.status < 500 && error.status !== 429);
 
 async function withRetry(label, fn) {
   try {
     return await fn();
   } catch (first) {
+    if (!retryable(first)) {
+      console.error(JSON.stringify({ event: "booking_notify_failed", label, error: String(first?.message || first) }));
+      return false;
+    }
     console.warn(JSON.stringify({ event: "booking_notify_retry", label, error: String(first?.message || first) }));
     try {
       return await fn();
